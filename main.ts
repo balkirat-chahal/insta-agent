@@ -16,10 +16,11 @@ import {
   runAgentTurn,
   aiGeneratePostText,
   aiRevisePostText,
-  renderTextImages,
+  renderAndUploadImages,
   imagePathFor,
   publicImageUrl,
   igPublishImages,
+  igImageUrlsFor,
   igFetchMyPosts,
 } from "./utils";
 
@@ -35,7 +36,8 @@ const PostSchema = z
     prompt: z.string(),
     content: z.string(),
     imageFiles: z.array(z.string()),
-    imageUrls: z.array(z.string()),
+    imageUrls: z.array(z.string()).openapi({ description: "Local server URLs" }),
+    imageCloudUrls: z.array(z.string()).openapi({ description: "Cloudinary HTTPS URLs (used for Instagram)" }),
     isCarousel: z.boolean(),
     igMediaId: z.string().nullable(),
     createdAt: z.string(),
@@ -48,13 +50,34 @@ const PostSummarySchema = z
     postId: z.string(),
     text: z.string(),
     slides: z.number(),
+    imageFiles: z.array(z.string()).optional(),
     imageUrls: z.array(z.string()),
+    imageCloudUrls: z.array(z.string()),
     publishedToInstagram: z.boolean(),
     igMediaId: z.string().nullable(),
   })
   .openapi("PostSummary");
 
 const ErrorSchema = z.object({ error: z.string() }).openapi("Error");
+
+const AgentEventSchema = z
+  .object({
+    ts: z.string(),
+    scope: z.string(),
+    status: z.enum(["ok", "error", "refused", "info"]),
+    message: z.string(),
+    detail: z.record(z.unknown()).optional(),
+  })
+  .openapi("AgentEvent");
+
+const DiagnosticsSchema = z
+  .object({
+    events: z.array(AgentEventSchema),
+    failures: z.array(z.string()),
+    warnings: z.array(z.string()),
+    toolsCalled: z.array(z.string()),
+  })
+  .openapi("Diagnostics");
 
 function toDto(p: NonNullable<ReturnType<typeof postRepo.get>>) {
   return {
@@ -63,6 +86,7 @@ function toDto(p: NonNullable<ReturnType<typeof postRepo.get>>) {
     content: p.content,
     imageFiles: p.imageFiles,
     imageUrls: p.imageFiles.map(publicImageUrl),
+    imageCloudUrls: p.imageCloudUrls ?? [],
     isCarousel: p.imageFiles.length > 1,
     igMediaId: p.igMediaId,
     createdAt: p.createdAt.toISOString(),
@@ -111,6 +135,11 @@ app.openapi(
               sessionId: z.string(),
               reply: z.string(),
               touchedPosts: z.array(PostSummarySchema),
+              diagnostics: DiagnosticsSchema.openapi({
+                description:
+                  "What happened this turn: tool timeline, failures, and warnings. " +
+                  "Check failures/warnings when create or publish does not work.",
+              }),
             }),
           },
         },
@@ -120,11 +149,23 @@ app.openapi(
   }),
   async (c) => {
     const { sessionId, message } = c.req.valid("json");
+    const sid = sessionId ?? crypto.randomUUID();
+    console.log(`[${new Date().toISOString()}] [http] POST /api/chat`, { sessionId: sid, message });
     try {
-      const result = await runAgentTurn(sessionId ?? crypto.randomUUID(), message);
+      const result = await runAgentTurn(sid, message);
+      if (result.diagnostics.failures.length || result.diagnostics.warnings.length) {
+        console.warn(`[${new Date().toISOString()}] [http] /api/chat issues`, {
+          sessionId: sid,
+          failures: result.diagnostics.failures,
+          warnings: result.diagnostics.warnings,
+          toolsCalled: result.diagnostics.toolsCalled,
+        });
+      }
       return c.json(result, 200);
     } catch (e) {
-      return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+      const error = e instanceof Error ? e.message : String(e);
+      console.error(`[${new Date().toISOString()}] [http] /api/chat crashed`, { sessionId: sid, error });
+      return c.json({ error }, 500);
     }
   }
 );
@@ -184,14 +225,21 @@ app.openapi(
     },
     responses: {
       200: { description: "Created post", content: { "application/json": { schema: PostSchema } } },
+      500: { description: "Create failed", content: { "application/json": { schema: ErrorSchema } } },
     },
   }),
   async (c) => {
     const { prompt } = c.req.valid("json");
-    const content = await aiGeneratePostText(prompt);
-    const imageFiles = await renderTextImages(content);
-    const post = postRepo.create({ prompt, content, imageFiles });
-    return c.json(toDto(post));
+    try {
+      const content = await aiGeneratePostText(prompt);
+      const { imageFiles, imageCloudUrls } = await renderAndUploadImages(content);
+      const post = postRepo.create({ prompt, content, imageFiles, imageCloudUrls });
+      return c.json(toDto(post), 200);
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      console.error(`[${new Date().toISOString()}] [http] POST /api/posts failed`, { error });
+      return c.json({ error }, 500);
+    }
   }
 );
 
@@ -229,6 +277,7 @@ app.openapi(
     responses: {
       200: { description: "Updated post", content: { "application/json": { schema: PostSchema } } },
       404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+      500: { description: "Update failed", content: { "application/json": { schema: ErrorSchema } } },
     },
   }),
   async (c) => {
@@ -237,8 +286,14 @@ app.openapi(
     const post = postRepo.get(id);
     if (!post) return c.json({ error: "Post not found" }, 404);
     const content = await aiRevisePostText(post.content, instruction);
-    const imageFiles = await renderTextImages(content);
-    return c.json(toDto(postRepo.update(id, { content, imageFiles })!), 200);
+    try {
+      const { imageFiles, imageCloudUrls } = await renderAndUploadImages(content);
+      return c.json(toDto(postRepo.update(id, { content, imageFiles, imageCloudUrls })!), 200);
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      console.error(`[${new Date().toISOString()}] [http] PATCH /api/posts failed`, { id, error });
+      return c.json({ error }, 500);
+    }
   }
 );
 
@@ -271,7 +326,7 @@ app.openapi(
     const post = postRepo.get(id);
     if (!post) return c.json({ error: "Post not found" }, 404);
     try {
-      const igMediaId = await igPublishImages(post.imageFiles.map(publicImageUrl), body.caption ?? post.content);
+      const igMediaId = await igPublishImages(igImageUrlsFor(post), body.caption ?? post.content);
       return c.json(toDto(postRepo.update(id, { igMediaId })!), 200);
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);

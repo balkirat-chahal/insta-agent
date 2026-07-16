@@ -23,6 +23,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 import { eq, asc, desc } from "drizzle-orm";
 import sharp from "sharp";
+import { v2 as cloudinary } from "cloudinary";
 import { z } from "zod";
 import { initChatModel } from "langchain/chat_models/universal";
 import { tool } from "@langchain/core/tools";
@@ -34,6 +35,16 @@ import {
   mapChatMessagesToStoredMessages,
   mapStoredMessagesToChatMessages,
 } from "@langchain/core/messages";
+
+function formatError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+function log(scope: string, message: string, extra?: Record<string, unknown>) {
+  const payload = extra ? ` ${JSON.stringify(extra)}` : "";
+  console.log(`[${new Date().toISOString()}] [${scope}] ${message}${payload}`);
+}
 
 // =============================================================================
 // 1. ENV
@@ -56,8 +67,14 @@ export const env = {
   IG_USER_ID: process.env.IG_USER_ID ?? "",
   IG_API_VERSION: process.env.IG_API_VERSION ?? "v25.0",
 
-  // Public HTTPS base URL of THIS server — Instagram fetches images from here.
+  // Public HTTPS base URL of THIS server — used for local image URLs in responses.
+  // Instagram publish uses Cloudinary URLs instead.
   PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 3000}`,
+
+  // --- Cloudinary (public HTTPS image hosting for Instagram) ---
+  CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME ?? "",
+  CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY ?? "",
+  CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET ?? "",
 
   // --- Storage ---
   IMAGES_DIR: process.env.IMAGES_DIR ?? path.resolve("data/images"),
@@ -75,7 +92,8 @@ export const posts = sqliteTable("posts", {
   id: text("id").primaryKey(),
   prompt: text("prompt").notNull(),
   content: text("content").notNull(),
-  imageFiles: text("image_files", { mode: "json" }).$type<string[]>().notNull(), // 1 = single, >1 = carousel
+  imageFiles: text("image_files", { mode: "json" }).$type<string[]>().notNull(), // local filenames
+  imageCloudUrls: text("image_cloud_urls", { mode: "json" }).$type<string[]>().notNull(), // Cloudinary secure URLs
   igMediaId: text("ig_media_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
@@ -97,6 +115,7 @@ sqlite.exec(`
     prompt TEXT NOT NULL,
     content TEXT NOT NULL,
     image_files TEXT NOT NULL,
+    image_cloud_urls TEXT NOT NULL DEFAULT '[]',
     ig_media_id TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -110,16 +129,31 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id);
 `);
 
+// Migrate older DBs that predate Cloudinary columns.
+{
+  const cols = sqlite.prepare(`PRAGMA table_info(posts)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === "image_cloud_urls")) {
+    sqlite.exec(`ALTER TABLE posts ADD COLUMN image_cloud_urls TEXT NOT NULL DEFAULT '[]'`);
+    log("db", "migrated posts: added image_cloud_urls");
+  }
+}
+
 export const db = drizzle(sqlite);
 
 export const postRepo = {
-  create(data: { prompt: string; content: string; imageFiles: string[] }): Post {
+  create(data: {
+    prompt: string;
+    content: string;
+    imageFiles: string[];
+    imageCloudUrls: string[];
+  }): Post {
     const now = new Date();
     const row: Post = {
       id: crypto.randomUUID(),
       prompt: data.prompt,
       content: data.content,
       imageFiles: data.imageFiles,
+      imageCloudUrls: data.imageCloudUrls,
       igMediaId: null,
       createdAt: now,
       updatedAt: now,
@@ -133,7 +167,10 @@ export const postRepo = {
   list(): Post[] {
     return db.select().from(posts).orderBy(desc(posts.createdAt)).all();
   },
-  update(id: string, patch: Partial<Pick<Post, "content" | "imageFiles" | "igMediaId">>): Post | undefined {
+  update(
+    id: string,
+    patch: Partial<Pick<Post, "content" | "imageFiles" | "imageCloudUrls" | "igMediaId">>
+  ): Post | undefined {
     db.update(posts).set({ ...patch, updatedAt: new Date() }).where(eq(posts.id, id)).run();
     return this.get(id);
   },
@@ -178,6 +215,10 @@ const LINE_HEIGHT_RATIO = 1.4;
 const CHAR_WIDTH_RATIO = 0.56; // avg glyph width ≈ 0.56 × font size (bold sans)
 const MAX_SLIDES = 10;
 
+// Concrete fonts that exist on macOS. Avoid "emoji" fallbacks — Pango aborts the
+// whole process when color-emoji fonts fail to load (common with Sharp/librsvg).
+const SVG_FONT_FAMILY = "Arial, Helvetica, 'Helvetica Neue', 'Gurmukhi MN', sans-serif";
+
 function escapeXml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -185,6 +226,22 @@ function escapeXml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+/**
+ * Strip emoji / pictographs before SVG render. Sharp→librsvg→Pango crashes hard
+ * ("Could not load fallback font, bailing out") when it tries to load color-emoji fonts.
+ */
+function sanitizeForImage(text: string): string {
+  return text
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/\p{Emoji_Presentation}/gu, "")
+    .replace(/[\uFE0E\uFE0F\u200D\u20E3]/g, "") // VS15/16, ZWJ, keycap
+    .replace(/[\u{1F3FB}-\u{1F3FF}]/gu, "") // skin tones
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function wrap(text: string, maxCharsPerLine: number): string[] {
@@ -264,7 +321,7 @@ async function renderSlide(text: string, slideNo: number, totalSlides: number): 
     .map(
       (line, i) =>
         `<text x="50%" y="${(startY + i * lineHeight).toFixed(1)}" text-anchor="middle" ` +
-        `font-family="DejaVu Sans, Arial, sans-serif" font-size="${fit.fontSize}" ` +
+        `font-family="${SVG_FONT_FAMILY}" font-size="${fit.fontSize}" ` +
         `font-weight="700" fill="#f5f5f4">${escapeXml(line)}</text>`
     )
     .join("\n");
@@ -272,7 +329,7 @@ async function renderSlide(text: string, slideNo: number, totalSlides: number): 
   const counter =
     totalSlides > 1
       ? `<text x="${IMG_SIZE - 60}" y="${IMG_SIZE - 52}" text-anchor="end" ` +
-        `font-family="DejaVu Sans, Arial, sans-serif" font-size="30" fill="#a8a29e">${slideNo}/${totalSlides}</text>`
+        `font-family="${SVG_FONT_FAMILY}" font-size="30" fill="#a8a29e">${slideNo}/${totalSlides}</text>`
       : "";
 
   const svg = `
@@ -283,13 +340,30 @@ async function renderSlide(text: string, slideNo: number, totalSlides: number): 
   </svg>`;
 
   const filename = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`;
-  await sharp(Buffer.from(svg)).png().toFile(path.join(env.IMAGES_DIR, filename));
+  try {
+    await sharp(Buffer.from(svg)).png().toFile(path.join(env.IMAGES_DIR, filename));
+  } catch (e) {
+    throw new Error(
+      `Image render failed (font/SVG): ${e instanceof Error ? e.message : String(e)}. ` +
+        `Text preview: ${JSON.stringify(text.slice(0, 80))}`
+    );
+  }
   return filename;
 }
 
 /** Render text to 1..10 images. Returns the filenames in slide order. */
 export async function renderTextImages(text: string): Promise<string[]> {
-  const slides = splitIntoSlides(text);
+  const cleaned = sanitizeForImage(text);
+  if (!cleaned) {
+    throw new Error("Nothing left to render after removing emoji/symbols from the post text.");
+  }
+  if (cleaned !== text.trim()) {
+    log("render", "stripped emoji/pictographs before image render", {
+      beforeLen: text.length,
+      afterLen: cleaned.length,
+    });
+  }
+  const slides = splitIntoSlides(cleaned);
   const files: string[] = [];
   for (let i = 0; i < slides.length; i++) {
     files.push(await renderSlide(slides[i], i + 1, slides.length));
@@ -303,6 +377,96 @@ export function imagePathFor(filename: string): string {
 
 export function publicImageUrl(filename: string): string {
   return `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/images/${filename}`;
+}
+
+// =============================================================================
+// 3b. CLOUDINARY — upload local renders; Instagram fetches these HTTPS URLs
+// =============================================================================
+
+export function cloudinaryConfigured(): boolean {
+  return !!(env.CLOUDINARY_CLOUD_NAME && env.CLOUDINARY_API_KEY && env.CLOUDINARY_API_SECRET);
+}
+
+function requireCloudinaryConfig() {
+  if (!cloudinaryConfigured()) {
+    throw new Error(
+      "Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and " +
+        "CLOUDINARY_API_SECRET in .env (needed so Instagram can fetch public image URLs)."
+    );
+  }
+}
+
+let cloudinaryReady = false;
+function ensureCloudinary() {
+  requireCloudinaryConfig();
+  if (!cloudinaryReady) {
+    cloudinary.config({
+      cloud_name: env.CLOUDINARY_CLOUD_NAME,
+      api_key: env.CLOUDINARY_API_KEY,
+      api_secret: env.CLOUDINARY_API_SECRET,
+      secure: true,
+    });
+    cloudinaryReady = true;
+  }
+}
+
+/** Upload one local PNG to Cloudinary; returns the secure HTTPS URL. */
+export async function uploadLocalImageToCloudinary(filename: string): Promise<string> {
+  ensureCloudinary();
+  const localPath = imagePathFor(filename);
+  if (!fs.existsSync(localPath)) {
+    throw new Error(`Cannot upload missing local image: ${localPath}`);
+  }
+  const publicId = `insta-agent/${path.parse(filename).name}`;
+  log("cloudinary", "uploading", { filename, publicId });
+  try {
+    const result = await cloudinary.uploader.upload(localPath, {
+      public_id: publicId,
+      overwrite: true,
+      resource_type: "image",
+      format: "png",
+    });
+    if (!result.secure_url) throw new Error("Cloudinary upload returned no secure_url");
+    log("cloudinary", "upload ok", { filename, url: result.secure_url });
+    return result.secure_url;
+  } catch (e) {
+    throw new Error(`Cloudinary upload failed for ${filename}: ${formatError(e)}`);
+  }
+}
+
+export async function uploadImageFilesToCloudinary(filenames: string[]): Promise<string[]> {
+  const urls: string[] = [];
+  for (const filename of filenames) {
+    urls.push(await uploadLocalImageToCloudinary(filename));
+  }
+  return urls;
+}
+
+/** Render locally, then upload each slide to Cloudinary. */
+export async function renderAndUploadImages(text: string): Promise<{
+  imageFiles: string[];
+  imageCloudUrls: string[];
+}> {
+  const imageFiles = await renderTextImages(text);
+  const imageCloudUrls = await uploadImageFilesToCloudinary(imageFiles);
+  return { imageFiles, imageCloudUrls };
+}
+
+/** URLs Instagram should fetch — Cloudinary only. */
+export function igImageUrlsFor(post: Post): string[] {
+  const urls = (post.imageCloudUrls ?? []).filter(Boolean);
+  if (urls.length === 0) {
+    throw new Error(
+      `Post ${post.id} has no Cloudinary URLs. Re-create or edit the post after Cloudinary is configured.`
+    );
+  }
+  if (urls.length !== post.imageFiles.length) {
+    log("cloudinary", "warning: cloud URL count != local file count", {
+      files: post.imageFiles.length,
+      cloud: urls.length,
+    });
+  }
+  return urls;
 }
 
 // =============================================================================
@@ -334,7 +498,8 @@ export async function aiGeneratePostText(prompt: string): Promise<string> {
       role: "system",
       content:
         "You write text for social media image posts. Return ONLY the post text — " +
-        "no quotes, no markdown, no explanations.",
+        "no quotes, no markdown, no explanations. Do NOT use emoji or emoticons " +
+        "(they break image rendering); use plain words only.",
     },
     { role: "user", content: prompt },
   ]);
@@ -348,7 +513,7 @@ export async function aiRevisePostText(current: string, instruction: string): Pr
       role: "system",
       content:
         "You edit social media post text. Apply the instruction to the current text. " +
-        "Return ONLY the revised text — no quotes, no markdown, no explanations.",
+        "Return ONLY the revised text — no quotes, no markdown, no explanations, no emoji.",
     },
     { role: "user", content: `Current text:\n${current}\n\nInstruction:\n${instruction}` },
   ]);
@@ -361,7 +526,27 @@ export async function aiRevisePostText(current: string, instruction: string): Pr
 
 const IG_BASE = () => `https://graph.instagram.com/${env.IG_API_VERSION}`;
 
-async function igFetch<T>(url: string, body?: Record<string, unknown>): Promise<T> {
+function igErrorMessage(status: number, json: any, step: string): string {
+  const err = json?.error ?? json;
+  const parts = [
+    `Instagram ${step} failed (HTTP ${status})`,
+    err?.message ? String(err.message) : undefined,
+    err?.error_user_msg ? String(err.error_user_msg) : undefined,
+    err?.code != null ? `code=${err.code}` : undefined,
+    err?.error_subcode != null ? `subcode=${err.error_subcode}` : undefined,
+    err?.type ? `type=${err.type}` : undefined,
+  ].filter(Boolean);
+  const hint =
+    !env.PUBLIC_BASE_URL.startsWith("https://")
+      ? " Hint: PUBLIC_BASE_URL must be public HTTPS for Instagram to fetch images."
+      : env.PUBLIC_BASE_URL.includes("localhost")
+        ? " Hint: PUBLIC_BASE_URL points at localhost — Instagram cannot reach it; use a tunnel."
+        : "";
+  return parts.join(" — ") + hint;
+}
+
+async function igFetch<T>(url: string, body?: Record<string, unknown>, step = "request"): Promise<T> {
+  log("ig", `→ ${step}`, { method: body ? "POST" : "GET", url: url.replace(env.IG_ACCESS_TOKEN, "***") });
   const res = await fetch(url, {
     method: body ? "POST" : "GET",
     headers: {
@@ -371,26 +556,46 @@ async function igFetch<T>(url: string, body?: Record<string, unknown>): Promise<
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = (await res.json()) as any;
-  if (!res.ok || json.error) throw new Error(`Instagram API error: ${JSON.stringify(json.error ?? json)}`);
+  if (!res.ok || json.error) {
+    const msg = igErrorMessage(res.status, json, step);
+    log("ig", `✗ ${msg}`, { body: body ? { ...body, caption: body.caption ? "[redacted]" : undefined } : undefined });
+    throw new Error(msg);
+  }
+  log("ig", `✓ ${step}`, { id: json.id, status_code: json.status_code });
   return json as T;
 }
 
 function requireIgConfig() {
-  if (!env.IG_ACCESS_TOKEN || !env.IG_USER_ID) {
-    throw new Error("IG_ACCESS_TOKEN and IG_USER_ID must be set in .env");
+  const missing: string[] = [];
+  if (!env.IG_ACCESS_TOKEN) missing.push("IG_ACCESS_TOKEN");
+  if (!env.IG_USER_ID) missing.push("IG_USER_ID");
+  if (missing.length) {
+    throw new Error(
+      `Cannot talk to Instagram — missing ${missing.join(" and ")} in .env. ` +
+        `Chat/create still work; only publish and reading the IG feed need these.`
+    );
   }
 }
 
 async function waitForContainer(containerId: string) {
   for (let i = 0; i < 20; i++) {
-    const s = await igFetch<{ status_code: string }>(`${IG_BASE()}/${containerId}?fields=status_code`);
+    const s = await igFetch<{ status_code: string }>(
+      `${IG_BASE()}/${containerId}?fields=status_code`,
+      undefined,
+      `container status (${containerId})`
+    );
     if (s.status_code === "FINISHED") return;
     if (s.status_code === "ERROR") {
-      throw new Error("Instagram failed to process media (is PUBLIC_BASE_URL publicly reachable over HTTPS?)");
+      throw new Error(
+        `Instagram failed to process media container ${containerId}. ` +
+          `Usually PUBLIC_BASE_URL is not publicly reachable over HTTPS, or the image URL 404s. ` +
+          `Current PUBLIC_BASE_URL=${env.PUBLIC_BASE_URL}`
+      );
     }
+    log("ig", `container ${containerId} status=${s.status_code}, waiting…`);
     await new Promise((r) => setTimeout(r, 3000));
   }
-  throw new Error("Timed out waiting for Instagram media container");
+  throw new Error(`Timed out waiting for Instagram media container ${containerId}`);
 }
 
 /** Publish 1 image as a feed post, or 2–10 images as a carousel. */
@@ -398,39 +603,50 @@ export async function igPublishImages(imageUrls: string[], caption: string): Pro
   requireIgConfig();
   if (imageUrls.length === 0) throw new Error("No images to publish");
   if (imageUrls.length > MAX_SLIDES) throw new Error(`Max ${MAX_SLIDES} images per carousel`);
+  log("ig", "publish start", { count: imageUrls.length, urls: imageUrls });
 
   let creationId: string;
 
   if (imageUrls.length === 1) {
-    const c = await igFetch<{ id: string }>(`${IG_BASE()}/${env.IG_USER_ID}/media`, {
-      image_url: imageUrls[0],
-      caption,
-    });
+    const c = await igFetch<{ id: string }>(
+      `${IG_BASE()}/${env.IG_USER_ID}/media`,
+      { image_url: imageUrls[0], caption },
+      "create single-image container"
+    );
     await waitForContainer(c.id);
     creationId = c.id;
   } else {
     // Carousel: item containers → parent CAROUSEL container
     const children: string[] = [];
-    for (const url of imageUrls) {
-      const item = await igFetch<{ id: string }>(`${IG_BASE()}/${env.IG_USER_ID}/media`, {
-        image_url: url,
-        is_carousel_item: true,
-      });
+    for (let i = 0; i < imageUrls.length; i++) {
+      const url = imageUrls[i];
+      const item = await igFetch<{ id: string }>(
+        `${IG_BASE()}/${env.IG_USER_ID}/media`,
+        { image_url: url, is_carousel_item: true },
+        `create carousel item ${i + 1}/${imageUrls.length}`
+      );
       await waitForContainer(item.id);
       children.push(item.id);
     }
-    const parent = await igFetch<{ id: string }>(`${IG_BASE()}/${env.IG_USER_ID}/media`, {
-      media_type: "CAROUSEL",
-      children: children.join(","), // Instagram expects a comma-separated string, not an array
-      caption,
-    });
+    const parent = await igFetch<{ id: string }>(
+      `${IG_BASE()}/${env.IG_USER_ID}/media`,
+      {
+        media_type: "CAROUSEL",
+        children: children.join(","), // Instagram expects a comma-separated string, not an array
+        caption,
+      },
+      "create carousel parent"
+    );
     await waitForContainer(parent.id);
     creationId = parent.id;
   }
 
-  const published = await igFetch<{ id: string }>(`${IG_BASE()}/${env.IG_USER_ID}/media_publish`, {
-    creation_id: creationId,
-  });
+  const published = await igFetch<{ id: string }>(
+    `${IG_BASE()}/${env.IG_USER_ID}/media_publish`,
+    { creation_id: creationId },
+    "media_publish"
+  );
+  log("ig", "publish done", { igMediaId: published.id });
   return published.id;
 }
 
@@ -446,7 +662,11 @@ export interface IgPost {
 export async function igFetchMyPosts(limit = 10): Promise<IgPost[]> {
   requireIgConfig();
   const fields = "id,caption,media_type,media_url,permalink,timestamp";
-  const json = await igFetch<{ data: IgPost[] }>(`${IG_BASE()}/me/media?fields=${fields}&limit=${limit}`);
+  const json = await igFetch<{ data: IgPost[] }>(
+    `${IG_BASE()}/me/media?fields=${fields}&limit=${limit}`,
+    undefined,
+    "fetch my media"
+  );
   return json.data ?? [];
 }
 
@@ -464,13 +684,26 @@ export async function igFetchMyPosts(limit = 10): Promise<IgPost[]> {
 // =============================================================================
 
 const PUBLISH_INTENT = /\b(post it|post this|post that|publish|upload|share|put it on|instagram|ig)\b/i;
+const CREATE_INTENT = /\b(create|make|write|generate|draft)\b.*\b(post|carousel|image|slide)/i;
+
+export type AgentEventStatus = "ok" | "error" | "refused" | "info";
+
+export interface AgentEvent {
+  ts: string;
+  scope: string;
+  status: AgentEventStatus;
+  message: string;
+  detail?: Record<string, unknown>;
+}
 
 export function postSummary(p: Post) {
   return {
     postId: p.id,
     text: p.content,
     slides: p.imageFiles.length,
+    imageFiles: p.imageFiles,
     imageUrls: p.imageFiles.map(publicImageUrl),
+    imageCloudUrls: p.imageCloudUrls ?? [],
     publishedToInstagram: !!p.igMediaId,
     igMediaId: p.igMediaId,
   };
@@ -479,17 +712,50 @@ export function postSummary(p: Post) {
 interface AgentContext {
   latestUserMessage: string;
   touchedPostIds: Set<string>;
+  events: AgentEvent[];
+}
+
+function pushEvent(
+  ctx: AgentContext,
+  scope: string,
+  status: AgentEventStatus,
+  message: string,
+  detail?: Record<string, unknown>
+) {
+  const event: AgentEvent = { ts: new Date().toISOString(), scope, status, message, detail };
+  ctx.events.push(event);
+  log(scope, `${status === "ok" ? "✓" : status === "error" ? "✗" : "•"} ${message}`, detail);
+}
+
+function toolError(message: string, detail?: Record<string, unknown>) {
+  return JSON.stringify({ ok: false, error: message, ...detail });
+}
+
+function toolOk(data: unknown) {
+  return JSON.stringify({ ok: true, ...(typeof data === "object" && data ? data : { result: data }) });
 }
 
 function buildTools(ctx: AgentContext) {
   return [
     tool(
       async ({ topicOrText, verbatim }) => {
-        const content = verbatim ? topicOrText : await aiGeneratePostText(topicOrText);
-        const imageFiles = await renderTextImages(content);
-        const post = postRepo.create({ prompt: topicOrText, content, imageFiles });
-        ctx.touchedPostIds.add(post.id);
-        return JSON.stringify(postSummary(post));
+        try {
+          pushEvent(ctx, "create_post", "info", "generating text + images", { topicOrText, verbatim: !!verbatim });
+          const content = verbatim ? topicOrText : await aiGeneratePostText(topicOrText);
+          const { imageFiles, imageCloudUrls } = await renderAndUploadImages(content);
+          const post = postRepo.create({ prompt: topicOrText, content, imageFiles, imageCloudUrls });
+          ctx.touchedPostIds.add(post.id);
+          pushEvent(ctx, "create_post", "ok", `created post ${post.id}`, {
+            slides: imageFiles.length,
+            imageFiles,
+            imageCloudUrls,
+          });
+          return toolOk(postSummary(post));
+        } catch (e) {
+          const message = `create_post failed: ${formatError(e)}`;
+          pushEvent(ctx, "create_post", "error", message);
+          return toolError(message);
+        }
       },
       {
         name: "create_post",
@@ -506,13 +772,28 @@ function buildTools(ctx: AgentContext) {
 
     tool(
       async ({ postId, instruction }) => {
-        const post = postRepo.get(postId);
-        if (!post) return JSON.stringify({ error: `No post with id ${postId}. Use list_posts.` });
-        const content = await aiRevisePostText(post.content, instruction);
-        const imageFiles = await renderTextImages(content);
-        const updated = postRepo.update(postId, { content, imageFiles })!;
-        ctx.touchedPostIds.add(postId);
-        return JSON.stringify(postSummary(updated));
+        try {
+          const post = postRepo.get(postId);
+          if (!post) {
+            const message = `No post with id ${postId}. Use list_posts.`;
+            pushEvent(ctx, "edit_post", "error", message);
+            return toolError(message);
+          }
+          pushEvent(ctx, "edit_post", "info", `editing ${postId}`, { instruction });
+          const content = await aiRevisePostText(post.content, instruction);
+          const { imageFiles, imageCloudUrls } = await renderAndUploadImages(content);
+          const updated = postRepo.update(postId, { content, imageFiles, imageCloudUrls })!;
+          ctx.touchedPostIds.add(postId);
+          pushEvent(ctx, "edit_post", "ok", `updated post ${postId}`, {
+            slides: imageFiles.length,
+            imageCloudUrls,
+          });
+          return toolOk(postSummary(updated));
+        } catch (e) {
+          const message = `edit_post failed: ${formatError(e)}`;
+          pushEvent(ctx, "edit_post", "error", message);
+          return toolError(message);
+        }
       },
       {
         name: "edit_post",
@@ -528,12 +809,27 @@ function buildTools(ctx: AgentContext) {
 
     tool(
       async ({ postId, text }) => {
-        const post = postRepo.get(postId);
-        if (!post) return JSON.stringify({ error: `No post with id ${postId}.` });
-        const imageFiles = await renderTextImages(text);
-        const updated = postRepo.update(postId, { content: text, imageFiles })!;
-        ctx.touchedPostIds.add(postId);
-        return JSON.stringify(postSummary(updated));
+        try {
+          const post = postRepo.get(postId);
+          if (!post) {
+            const message = `No post with id ${postId}.`;
+            pushEvent(ctx, "set_post_text", "error", message);
+            return toolError(message);
+          }
+          const imageFiles = await renderTextImages(text);
+          const imageCloudUrls = await uploadImageFilesToCloudinary(imageFiles);
+          const updated = postRepo.update(postId, { content: text, imageFiles, imageCloudUrls })!;
+          ctx.touchedPostIds.add(postId);
+          pushEvent(ctx, "set_post_text", "ok", `set text on ${postId}`, {
+            slides: imageFiles.length,
+            imageCloudUrls,
+          });
+          return toolOk(postSummary(updated));
+        } catch (e) {
+          const message = `set_post_text failed: ${formatError(e)}`;
+          pushEvent(ctx, "set_post_text", "error", message);
+          return toolError(message);
+        }
       },
       {
         name: "set_post_text",
@@ -543,7 +839,11 @@ function buildTools(ctx: AgentContext) {
     ),
 
     tool(
-      async () => JSON.stringify(postRepo.list().slice(0, 20).map(postSummary)),
+      async () => {
+        const list = postRepo.list().slice(0, 20).map(postSummary);
+        pushEvent(ctx, "list_posts", "ok", `listed ${list.length} posts`);
+        return toolOk({ posts: list });
+      },
       {
         name: "list_posts",
         description: "List locally saved posts (most recent first) with their postIds.",
@@ -554,9 +854,13 @@ function buildTools(ctx: AgentContext) {
     tool(
       async ({ limit }) => {
         try {
-          return JSON.stringify(await igFetchMyPosts(limit ?? 10));
+          const posts = await igFetchMyPosts(limit ?? 10);
+          pushEvent(ctx, "get_instagram_posts", "ok", `fetched ${posts.length} IG posts`);
+          return toolOk({ posts });
         } catch (e) {
-          return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+          const message = `get_instagram_posts failed: ${formatError(e)}`;
+          pushEvent(ctx, "get_instagram_posts", "error", message);
+          return toolError(message);
         }
       },
       {
@@ -570,21 +874,39 @@ function buildTools(ctx: AgentContext) {
       async ({ postId, caption }) => {
         // HARD GUARD: refuse unless the latest user message shows publish intent.
         if (!PUBLISH_INTENT.test(ctx.latestUserMessage)) {
-          return JSON.stringify({
-            error:
-              "REFUSED: The user has not explicitly asked to publish in their latest message. " +
-              "Ask the user to confirm they want this posted to Instagram.",
-          });
+          const message =
+            "REFUSED: Latest user message does not look like an explicit publish request. " +
+            'Say something like "publish it" / "post this to Instagram". ' +
+            `Message was: ${JSON.stringify(ctx.latestUserMessage)}`;
+          pushEvent(ctx, "publish_post", "refused", message, { postId });
+          return toolError(message, { reason: "no_publish_intent" });
         }
         const post = postRepo.get(postId);
-        if (!post) return JSON.stringify({ error: `No post with id ${postId}.` });
+        if (!post) {
+          const message = `No post with id ${postId}.`;
+          pushEvent(ctx, "publish_post", "error", message);
+          return toolError(message);
+        }
         try {
-          const igMediaId = await igPublishImages(post.imageFiles.map(publicImageUrl), caption ?? post.content);
+          pushEvent(ctx, "publish_post", "info", `publishing ${postId}`, {
+            slides: post.imageFiles.length,
+            imageCloudUrls: post.imageCloudUrls,
+          });
+          const igMediaId = await igPublishImages(igImageUrlsFor(post), caption ?? post.content);
           const updated = postRepo.update(postId, { igMediaId })!;
           ctx.touchedPostIds.add(postId);
-          return JSON.stringify({ published: true, ...postSummary(updated) });
+          pushEvent(ctx, "publish_post", "ok", `published ${postId} → IG ${igMediaId}`);
+          return toolOk({ published: true, ...postSummary(updated) });
         } catch (e) {
-          return JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+          const message = `publish_post failed: ${formatError(e)}`;
+          pushEvent(ctx, "publish_post", "error", message, {
+            publicBaseUrl: env.PUBLIC_BASE_URL,
+            hasToken: !!env.IG_ACCESS_TOKEN,
+            hasUserId: !!env.IG_USER_ID,
+            hasCloudinary: cloudinaryConfigured(),
+            imageCloudUrls: postRepo.get(postId)?.imageCloudUrls ?? [],
+          });
+          return toolError(message);
         }
       },
       {
@@ -611,22 +933,110 @@ Rules:
 - When the user refers to "it" / "that post" / "the last one", resolve it from the conversation or use list_posts.
 - NEVER publish to Instagram unless the user's latest message explicitly asks you to post/publish/upload. Creating or editing a post is NOT permission to publish it. If ambiguous, ask for confirmation and do nothing.
 - After publishing, confirm with the Instagram media id.
-- Keep replies short and conversational.`;
+- If a tool returns ok:false or an error, you MUST tell the user the exact error message and what to fix. Do not hide or soften failures.
+- Keep replies short and conversational, but never omit failure reasons.`;
 
 export interface AgentResult {
   sessionId: string;
   reply: string;
   touchedPosts: ReturnType<typeof postSummary>[];
+  /** Structured timeline of what happened this turn — use this when the reply is vague. */
+  diagnostics: {
+    events: AgentEvent[];
+    failures: string[];
+    warnings: string[];
+    toolsCalled: string[];
+  };
+}
+
+function buildDiagnostics(ctx: AgentContext, toolsCalled: string[]): AgentResult["diagnostics"] {
+  const failures = ctx.events.filter((e) => e.status === "error" || e.status === "refused").map((e) => e.message);
+  const warnings: string[] = [];
+
+  if (CREATE_INTENT.test(ctx.latestUserMessage) && !toolsCalled.includes("create_post") && ctx.touchedPostIds.size === 0) {
+    warnings.push(
+      "User message looks like a create request, but create_post was not called. The model may have skipped the tool."
+    );
+  }
+  if (PUBLISH_INTENT.test(ctx.latestUserMessage) && !toolsCalled.includes("publish_post")) {
+    warnings.push(
+      "User message looks like a publish request, but publish_post was not called. " +
+        (!env.IG_ACCESS_TOKEN || !env.IG_USER_ID
+          ? "IG credentials may be missing, or the model skipped the tool."
+          : "The model may have skipped the tool or needs a clearer postId.")
+    );
+  }
+  if (PUBLISH_INTENT.test(ctx.latestUserMessage) && (!env.IG_ACCESS_TOKEN || !env.IG_USER_ID)) {
+    warnings.push("IG_ACCESS_TOKEN / IG_USER_ID not set — publish will fail until they are configured.");
+  }
+  if (!cloudinaryConfigured()) {
+    warnings.push(
+      "Cloudinary is not configured (CLOUDINARY_CLOUD_NAME / API_KEY / API_SECRET) — create/edit/publish need it for public image URLs."
+    );
+  }
+
+  return { events: ctx.events, failures, warnings, toolsCalled };
+}
+
+function enrichReply(reply: string, diagnostics: AgentResult["diagnostics"]): string {
+  if (!diagnostics.failures.length && !diagnostics.warnings.length) return reply;
+
+  const bits: string[] = [];
+  if (diagnostics.failures.length) {
+    bits.push("What failed:\n" + diagnostics.failures.map((f) => `• ${f}`).join("\n"));
+  }
+  if (diagnostics.warnings.length) {
+    bits.push("Warnings:\n" + diagnostics.warnings.map((w) => `• ${w}`).join("\n"));
+  }
+
+  const appendix = bits.join("\n\n");
+  // Avoid duplicating if the model already pasted the same errors.
+  if (diagnostics.failures.every((f) => reply.includes(f.slice(0, 40)))) return reply;
+  return `${reply}\n\n---\n${appendix}`;
 }
 
 /** Run one chat turn: load history, tool-call loop, persist, respond. */
 export async function runAgentTurn(sessionId: string, userMessage: string): Promise<AgentResult> {
-  const ctx: AgentContext = { latestUserMessage: userMessage, touchedPostIds: new Set() };
+  const ctx: AgentContext = { latestUserMessage: userMessage, touchedPostIds: new Set(), events: [] };
   const tools = buildTools(ctx);
   const toolMap = new Map(tools.map((t) => [t.name, t]));
+  const toolsCalled: string[] = [];
 
-  const model = await getModel();
-  const modelWithTools = model.bindTools!(tools);
+  pushEvent(ctx, "agent", "info", "turn start", {
+    sessionId,
+    message: userMessage,
+    provider: env.AI_PROVIDER,
+    model: env.AI_MODEL,
+  });
+
+  let model;
+  try {
+    model = await getModel();
+  } catch (e) {
+    const message = `Failed to init model (${env.AI_PROVIDER}/${env.AI_MODEL}): ${formatError(e)}`;
+    pushEvent(ctx, "agent", "error", message);
+    const diagnostics = buildDiagnostics(ctx, toolsCalled);
+    return {
+      sessionId,
+      reply: enrichReply("I couldn't reach the language model.", diagnostics),
+      touchedPosts: [],
+      diagnostics,
+    };
+  }
+
+  if (typeof model.bindTools !== "function") {
+    const message = `Model ${env.AI_PROVIDER}/${env.AI_MODEL} does not support tool calling (bindTools missing).`;
+    pushEvent(ctx, "agent", "error", message);
+    const diagnostics = buildDiagnostics(ctx, toolsCalled);
+    return {
+      sessionId,
+      reply: enrichReply(message, diagnostics),
+      touchedPosts: [],
+      diagnostics,
+    };
+  }
+
+  const modelWithTools = model.bindTools(tools);
 
   const history = chatRepo.history(sessionId);
   const humanMsg = new HumanMessage(userMessage);
@@ -635,32 +1045,46 @@ export async function runAgentTurn(sessionId: string, userMessage: string): Prom
 
   let reply = "I couldn't complete that — please try again.";
 
-  for (let step = 0; step < 8; step++) {
-    const ai = await modelWithTools.invoke(messages);
-    messages.push(ai);
-    newMessages.push(ai);
+  try {
+    for (let step = 0; step < 8; step++) {
+      pushEvent(ctx, "agent", "info", `model step ${step + 1}`);
+      const ai = await modelWithTools.invoke(messages);
+      messages.push(ai);
+      newMessages.push(ai);
 
-    const toolCalls = ai.tool_calls ?? [];
-    if (toolCalls.length === 0) {
-      reply = typeof ai.content === "string" ? ai.content : JSON.stringify(ai.content);
-      break;
-    }
-
-    for (const tc of toolCalls) {
-      const t = toolMap.get(tc.name);
-      let output: string;
-      try {
-        // Tools are a heterogeneous union; invoke via DynamicStructuredTool's common shape.
-        output = t
-          ? String(await (t as { invoke: (args: unknown) => Promise<unknown> }).invoke(tc.args))
-          : JSON.stringify({ error: `Unknown tool ${tc.name}` });
-      } catch (e) {
-        output = JSON.stringify({ error: e instanceof Error ? e.message : String(e) });
+      const toolCalls = ai.tool_calls ?? [];
+      if (toolCalls.length === 0) {
+        reply = typeof ai.content === "string" ? ai.content : JSON.stringify(ai.content);
+        pushEvent(ctx, "agent", "ok", "final reply (no more tools)", {
+          replyPreview: reply.slice(0, 160),
+        });
+        break;
       }
-      const toolMsg = new ToolMessage({ content: output, tool_call_id: tc.id!, name: tc.name });
-      messages.push(toolMsg);
-      newMessages.push(toolMsg);
+
+      for (const tc of toolCalls) {
+        toolsCalled.push(tc.name);
+        pushEvent(ctx, "agent", "info", `tool call ${tc.name}`, { args: tc.args });
+        const t = toolMap.get(tc.name);
+        let output: string;
+        try {
+          output = t
+            ? String(await (t as { invoke: (args: unknown) => Promise<unknown> }).invoke(tc.args))
+            : toolError(`Unknown tool ${tc.name}`);
+          if (!t) pushEvent(ctx, "agent", "error", `Unknown tool ${tc.name}`);
+        } catch (e) {
+          const message = `Tool ${tc.name} threw: ${formatError(e)}`;
+          pushEvent(ctx, tc.name, "error", message);
+          output = toolError(message);
+        }
+        const toolMsg = new ToolMessage({ content: output, tool_call_id: tc.id!, name: tc.name });
+        messages.push(toolMsg);
+        newMessages.push(toolMsg);
+      }
     }
+  } catch (e) {
+    const message = `Agent loop failed: ${formatError(e)}`;
+    pushEvent(ctx, "agent", "error", message);
+    reply = "Something went wrong while talking to the model.";
   }
 
   chatRepo.append(sessionId, newMessages);
@@ -670,5 +1094,14 @@ export async function runAgentTurn(sessionId: string, userMessage: string): Prom
     .filter((p): p is Post => !!p)
     .map(postSummary);
 
-  return { sessionId, reply, touchedPosts };
+  const diagnostics = buildDiagnostics(ctx, toolsCalled);
+  reply = enrichReply(reply, diagnostics);
+
+  pushEvent(ctx, "agent", "info", "turn end", {
+    failures: diagnostics.failures.length,
+    warnings: diagnostics.warnings.length,
+    toolsCalled,
+  });
+
+  return { sessionId, reply, touchedPosts, diagnostics };
 }
