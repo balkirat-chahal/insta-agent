@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Post Studio</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --panel: #ffffff;
+      --text: #0d0d0d;
+      --muted: #6b6b6b;
+      --border: #e5e5e5;
+      --user: #0d0d0d;
+      --user-fg: #fff;
+      --assistant: #f4f4f4;
+      --accent: #10a37f;
+      --danger: #c33;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    header .meta {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    button {
+      font: inherit;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 8px 14px;
+      font-size: 13px;
+    }
+    button:hover { background: #f0f0f0; }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover { filter: brightness(0.95); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #thread {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 16px 120px;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 80px 16px;
+      line-height: 1.5;
+    }
+    .empty strong { color: var(--text); display: block; font-size: 20px; margin-bottom: 8px; }
+
+    .msg {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 100%;
+    }
+    .msg.user { align-items: flex-end; }
+    .msg.assistant { align-items: flex-start; }
+    .bubble {
+      max-width: min(100%, 640px);
+      padding: 12px 14px;
+      border-radius: 18px;
+      line-height: 1.55;
+      font-size: 15px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user .bubble {
+      background: var(--user);
+      color: var(--user-fg);
+      border-bottom-right-radius: 6px;
+    }
+    .msg.assistant .bubble {
+      background: var(--assistant);
+      border-bottom-left-radius: 6px;
+    }
+    .bubble .err {
+      color: var(--danger);
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #e8c8c8;
+      font-size: 13px;
+    }
+    .bubble code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+      background: rgba(0,0,0,0.06);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .msg.user .bubble code { background: rgba(255,255,255,0.15); }
+
+    .posts {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      width: min(100%, 380px);
+    }
+    .post-card {
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #222;
+      color: #fff;
+    }
+    .post-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      color: #cfcfcf;
+      background: #111;
+    }
+    .post-meta code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      color: #9ad;
+    }
+    .carousel {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      background: #0c0a09;
+      overflow: hidden;
+    }
+    .carousel-track {
+      display: flex;
+      height: 100%;
+      transition: transform 0.25s ease;
+    }
+    .carousel-track img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      flex: 0 0 100%;
+      display: block;
+      background: #0c0a09;
+    }
+    .carousel-nav {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      pointer-events: none;
+      padding: 0 8px;
+    }
+    .carousel-nav button {
+      pointer-events: auto;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.85);
+      border: none;
+      font-size: 16px;
+      line-height: 1;
+      display: none;
+    }
+    .carousel.has-many .carousel-nav button { display: grid; place-items: center; }
+    .dots {
+      position: absolute;
+      left: 0; right: 0; bottom: 10px;
+      display: none;
+      justify-content: center;
+      gap: 5px;
+    }
+    .carousel.has-many .dots { display: flex; }
+    .dots span {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.35);
+    }
+    .dots span.on { background: #fff; }
+    .caption {
+      padding: 10px 12px 12px;
+      font-size: 13px;
+      line-height: 1.45;
+      color: #eee;
+      white-space: pre-wrap;
+      max-height: 120px;
+      overflow: auto;
+    }
+
+    .composer {
+      position: sticky;
+      bottom: 0;
+      padding: 12px 16px 20px;
+      background: linear-gradient(to top, var(--bg) 70%, transparent);
+    }
+    .composer-inner {
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 8px 8px 8px 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.04);
+    }
+    textarea {
+      flex: 1;
+      border: 0;
+      outline: none;
+      resize: none;
+      font: inherit;
+      font-size: 15px;
+      line-height: 1.4;
+      max-height: 160px;
+      padding: 8px 0;
+      background: transparent;
+      color: var(--text);
+    }
+    .composer-inner button.primary {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 18px;
+    }
+
+    .typing {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 0 4px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Post Studio</h1>
+      <div class="meta" id="sessionLabel">New chat</div>
+    </div>
+    <button type="button" id="newChat">New chat</button>
+  </header>
+
+  <main id="thread">
+    <div class="wrap" id="messages">
+      <div class="empty" id="empty">
+        <strong>What do you want to post?</strong>
+        Ask the agent to write a confession, edit a draft, or publish when you’re ready.
+      </div>
+    </div>
+  </main>
+
+  <form class="composer" id="form">
+    <div class="composer-inner">
+      <textarea id="input" rows="1" placeholder="Message Post Studio…" autofocus></textarea>
+      <button class="primary" type="submit" id="send" title="Send">↑</button>
+    </div>
+  </form>
+
+  <script>
+    const messagesEl = document.getElementById("messages");
+    const emptyEl = document.getElementById("empty");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const sessionLabel = document.getElementById("sessionLabel");
+    const thread = document.getElementById("thread");
+
+    let sessionId = null;
+    let busy = false;
+
+    function uuid() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === "x" ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    /** Light text formatting: escape, then `code` and **bold**. */
+    function formatText(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+      html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      return html;
+    }
+
+    function autosize() {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    }
+
+    function scrollBottom() {
+      thread.scrollTop = thread.scrollHeight;
+    }
+
+    function setBusy(v) {
+      busy = v;
+      sendBtn.disabled = v;
+      input.disabled = v;
+    }
+
+    function updateSessionLabel() {
+      sessionLabel.textContent = sessionId ? `session ${sessionId.slice(0, 8)}…` : "New chat";
+    }
+
+    function clearChat() {
+      sessionId = null;
+      messagesEl.innerHTML = "";
+      messagesEl.appendChild(emptyEl);
+      emptyEl.hidden = false;
+      updateSessionLabel();
+      input.focus();
+    }
+
+    function ensureThread() {
+      emptyEl.hidden = true;
+      if (emptyEl.parentElement) emptyEl.remove();
+    }
+
+    function addMessage(role, htmlContent) {
+      ensureThread();
+      const msg = document.createElement("div");
+      msg.className = `msg ${role}`;
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.innerHTML = htmlContent;
+      msg.appendChild(bubble);
+      messagesEl.appendChild(msg);
+      scrollBottom();
+      return msg;
+    }
+
+    function buildCarousel(urls) {
+      const carousel = document.createElement("div");
+      carousel.className = "carousel" + (urls.length > 1 ? " has-many" : "");
+      const track = document.createElement("div");
+      track.className = "carousel-track";
+      urls.forEach((url) => {
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = "Post slide";
+        img.loading = "lazy";
+        track.appendChild(img);
+      });
+      carousel.appendChild(track);
+
+      let index = 0;
+      const sync = () => {
+        track.style.transform = `translateX(-${index * 100}%)`;
+        dots.querySelectorAll("span").forEach((d, i) => d.classList.toggle("on", i === index));
+      };
+
+      const nav = document.createElement("div");
+      nav.className = "carousel-nav";
+      const prev = document.createElement("button");
+      prev.type = "button";
+      prev.textContent = "‹";
+      const next = document.createElement("button");
+      next.type = "button";
+      next.textContent = "›";
+      prev.addEventListener("click", () => {
+        index = (index - 1 + urls.length) % urls.length;
+        sync();
+      });
+      next.addEventListener("click", () => {
+        index = (index + 1) % urls.length;
+        sync();
+      });
+      nav.append(prev, next);
+      carousel.appendChild(nav);
+
+      const dots = document.createElement("div");
+      dots.className = "dots";
+      urls.forEach((_, i) => {
+        const d = document.createElement("span");
+        if (i === 0) d.classList.add("on");
+        dots.appendChild(d);
+      });
+      carousel.appendChild(dots);
+
+      let startX = 0;
+      carousel.addEventListener("touchstart", (e) => {
+        startX = e.changedTouches[0].screenX;
+      }, { passive: true });
+      carousel.addEventListener("touchend", (e) => {
+        const dx = e.changedTouches[0].screenX - startX;
+        if (Math.abs(dx) < 40) return;
+        index = dx < 0
+          ? (index + 1) % urls.length
+          : (index - 1 + urls.length) % urls.length;
+        sync();
+      }, { passive: true });
+
+      return carousel;
+    }
+
+    function renderPosts(posts) {
+      if (!posts?.length) return;
+      ensureThread();
+      const wrap = document.createElement("div");
+      wrap.className = "msg assistant";
+      const stack = document.createElement("div");
+      stack.className = "posts";
+
+      for (const post of posts) {
+        const urls = (post.imageCloudUrls?.length ? post.imageCloudUrls : post.imageUrls) || [];
+        if (!urls.length) continue;
+        const card = document.createElement("div");
+        card.className = "post-card";
+
+        const meta = document.createElement("div");
+        meta.className = "post-meta";
+        meta.innerHTML = `<span>${post.slides || urls.length} slide${(post.slides || urls.length) === 1 ? "" : "s"}</span><code>${escapeHtml(post.postId)}</code>`;
+        card.appendChild(meta);
+        card.appendChild(buildCarousel(urls));
+
+        const caption = document.createElement("div");
+        caption.className = "caption";
+        caption.textContent = post.text || "";
+        card.appendChild(caption);
+        stack.appendChild(card);
+      }
+
+      if (stack.children.length) {
+        wrap.appendChild(stack);
+        messagesEl.appendChild(wrap);
+        scrollBottom();
+      }
+    }
+
+    async function sendMessage(text) {
+      if (!text || busy) return;
+      setBusy(true);
+      addMessage("user", formatText(text));
+      input.value = "";
+      autosize();
+
+      const typing = addMessage("assistant", `<span class="typing">Thinking…</span>`);
+
+      try {
+        if (!sessionId) sessionId = uuid();
+        updateSessionLabel();
+
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, message: text }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        sessionId = data.sessionId || sessionId;
+        updateSessionLabel();
+
+        let html = formatText(data.reply || "(empty reply)");
+        const failures = data.diagnostics?.failures || [];
+        if (failures.length) {
+          html += `<div class="err">${failures.map(escapeHtml).join("<br>")}</div>`;
+        }
+        typing.querySelector(".bubble").innerHTML = html;
+        renderPosts(data.touchedPosts || []);
+      } catch (e) {
+        typing.querySelector(".bubble").innerHTML =
+          `<div class="err">${escapeHtml(e.message || String(e))}</div>`;
+      } finally {
+        setBusy(false);
+        input.focus();
+        scrollBottom();
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      sendMessage(input.value.trim());
+    });
+
+    input.addEventListener("input", autosize);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    document.getElementById("newChat").addEventListener("click", () => {
+      if (busy) return;
+      clearChat();
+    });
+
+    clearChat();
+  </script>
+</body>
+</html>

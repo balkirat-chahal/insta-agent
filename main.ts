@@ -7,12 +7,12 @@ import { serve } from "@hono/node-server";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { Scalar } from "@scalar/hono-api-reference";
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import {
   env,
   postRepo,
   chatRepo,
-  postSummary,
   runAgentTurn,
   aiGeneratePostText,
   aiRevisePostText,
@@ -389,8 +389,14 @@ app.get("/images/:filename", (c) => {
 });
 
 // -----------------------------------------------------------------------------
-// OpenAPI spec + Scalar docs
+// Chat UI (single static file)
 // -----------------------------------------------------------------------------
+
+app.get("/chat", (c) => {
+  const filePath = path.resolve("public/chat.html");
+  if (!fs.existsSync(filePath)) return c.text("chat.html missing", 404);
+  return c.html(fs.readFileSync(filePath, "utf8"));
+});
 
 app.doc("/openapi.json", {
   openapi: "3.1.0",
@@ -404,8 +410,27 @@ app.doc("/openapi.json", {
 });
 
 app.get("/docs", Scalar({ url: "/openapi.json", theme: "purple" }));
-app.get("/", (c) => c.redirect("/docs"));
+app.get("/", (c) => c.redirect("/chat"));
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
-  console.log(`🚀 http://localhost:${info.port}/docs`);
+  console.log(`🚀 chat  http://localhost:${info.port}/chat`);
+  console.log(`📚 docs  http://localhost:${info.port}/docs`);
+
+  const checks: [string, boolean][] = [
+    ["AI_PROVIDER", !!env.AI_PROVIDER],
+    ["AI_MODEL", !!env.AI_MODEL],
+    ["OPENAI_BASE_URL", !!env.OPENAI_BASE_URL],
+    ["OPENAI_API_KEY", !!env.OPENAI_API_KEY],
+    ["GOOGLE_API_KEY", !!process.env.GOOGLE_API_KEY],
+    ["CLOUDINARY_CLOUD_NAME", !!env.CLOUDINARY_CLOUD_NAME],
+    ["CLOUDINARY_API_KEY", !!env.CLOUDINARY_API_KEY],
+    ["CLOUDINARY_API_SECRET", !!env.CLOUDINARY_API_SECRET],
+    ["IG_ACCESS_TOKEN", !!env.IG_ACCESS_TOKEN],
+    ["IG_USER_ID", !!env.IG_USER_ID],
+  ];
+
+  console.log("🔑 env credentials:");
+  for (const [name, ok] of checks) {
+    console.log(`   ${ok ? "✓" : "✗"} ${name}${ok ? "" : "  (missing)"}`);
+  }
 });
