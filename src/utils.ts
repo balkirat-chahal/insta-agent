@@ -2,13 +2,8 @@
 // utils.ts — env, database, AI, agent (tool calling), image rendering, Instagram
 // =============================================================================
 //
-// Install:
-//   npm i hono @hono/node-server @hono/zod-openapi @scalar/hono-api-reference
-//   npm i langchain @langchain/core @langchain/google-genai
-//   npm i drizzle-orm better-sqlite3 sharp zod dotenv
-//   npm i -D typescript tsx @types/node @types/better-sqlite3
-//
-// Run:  npx tsx main.ts   →   open http://localhost:3000/docs
+// Dev:  pnpm dev
+// Prod: pnpm build && pnpm start
 //
 // NOTE: schema changed (posts now store multiple images). Delete data/app.db
 // from the previous version before starting.
@@ -181,9 +176,12 @@ export const postRepo = {
   },
   update(
     id: string,
-    patch: Partial<Pick<Post, "content" | "imageFiles" | "imageCloudUrls" | "igMediaId">>
+    patch: Partial<Pick<Post, "content" | "imageFiles" | "imageCloudUrls" | "igMediaId">>,
   ): Post | undefined {
-    db.update(posts).set({ ...patch, updatedAt: new Date() }).where(eq(posts.id, id)).run();
+    db.update(posts)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(posts.id, id))
+      .run();
     return this.get(id);
   },
 };
@@ -248,7 +246,9 @@ function sanitizeForImage(text: string): string {
   return text
     .replace(/\p{Extended_Pictographic}/gu, "")
     .replace(/\p{Emoji_Presentation}/gu, "")
-    .replace(/[\uFE0E\uFE0F\u200D\u20E3]/g, "") // VS15/16, ZWJ, keycap
+    .replace(/\uFE0E|\uFE0F/g, "") // text/emoji variation selectors
+    .replace(/\u200D/g, "") // ZWJ
+    .replace(/\u20E3/g, "") // combining enclosing keycap
     .replace(/[\u{1F3FB}-\u{1F3FF}]/gu, "") // skin tones
     .replace(/[^\S\n]+/g, " ")
     .replace(/ *\n */g, "\n")
@@ -290,7 +290,10 @@ function fitFont(text: string): { fontSize: number; lines: string[] } | null {
 function splitIntoSlides(text: string): string[] {
   if (fitFont(text)) return [text];
 
-  const sentences = text.match(/[^.!?\n]+[.!?]*\s*/g)?.map((s) => s.trim()).filter(Boolean) ?? [text];
+  const sentences = text
+    .match(/[^.!?\n]+[.!?]*\s*/g)
+    ?.map((s) => s.trim())
+    .filter(Boolean) ?? [text];
   const slides: string[] = [];
   let current = "";
 
@@ -325,7 +328,10 @@ function splitIntoSlides(text: string): string[] {
 }
 
 async function renderSlide(text: string, slideNo: number, totalSlides: number): Promise<string> {
-  const fit = fitFont(text) ?? { fontSize: MIN_FONT, lines: wrap(text, Math.floor(USABLE / (MIN_FONT * CHAR_WIDTH_RATIO))) };
+  const fit = fitFont(text) ?? {
+    fontSize: MIN_FONT,
+    lines: wrap(text, Math.floor(USABLE / (MIN_FONT * CHAR_WIDTH_RATIO))),
+  };
   const lineHeight = fit.fontSize * LINE_HEIGHT_RATIO;
   const startY = IMG_SIZE / 2 - ((fit.lines.length - 1) * lineHeight) / 2 + fit.fontSize * 0.35;
 
@@ -334,7 +340,7 @@ async function renderSlide(text: string, slideNo: number, totalSlides: number): 
       (line, i) =>
         `<text x="50%" y="${(startY + i * lineHeight).toFixed(1)}" text-anchor="middle" ` +
         `font-family="${SVG_FONT_FAMILY}" font-size="${fit.fontSize}" ` +
-        `font-weight="700" fill="#f5f5f4">${escapeXml(line)}</text>`
+        `font-weight="700" fill="#f5f5f4">${escapeXml(line)}</text>`,
     )
     .join("\n");
 
@@ -357,7 +363,7 @@ async function renderSlide(text: string, slideNo: number, totalSlides: number): 
   } catch (e) {
     throw new Error(
       `Image render failed (font/SVG): ${e instanceof Error ? e.message : String(e)}. ` +
-        `Text preview: ${JSON.stringify(text.slice(0, 80))}`
+        `Text preview: ${JSON.stringify(text.slice(0, 80))}`,
     );
   }
   return filename;
@@ -403,7 +409,7 @@ function requireCloudinaryConfig() {
   if (!cloudinaryConfigured()) {
     throw new Error(
       "Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and " +
-        "CLOUDINARY_API_SECRET in .env (needed so Instagram can fetch public image URLs)."
+        "CLOUDINARY_API_SECRET in .env (needed so Instagram can fetch public image URLs).",
     );
   }
 }
@@ -469,7 +475,7 @@ export function igImageUrlsFor(post: Post): string[] {
   const urls = (post.imageCloudUrls ?? []).filter(Boolean);
   if (urls.length === 0) {
     throw new Error(
-      `Post ${post.id} has no Cloudinary URLs. Re-create or edit the post after Cloudinary is configured.`
+      `Post ${post.id} has no Cloudinary URLs. Re-create or edit the post after Cloudinary is configured.`,
     );
   }
   if (urls.length !== post.imageFiles.length) {
@@ -495,9 +501,7 @@ export function getModel() {
     ...(env.AI_PROVIDER === "openai"
       ? {
           apiKey: env.OPENAI_API_KEY || "ollama",
-          configuration: env.OPENAI_BASE_URL
-            ? { baseURL: env.OPENAI_BASE_URL }
-            : undefined,
+          configuration: env.OPENAI_BASE_URL ? { baseURL: env.OPENAI_BASE_URL } : undefined,
         }
       : {}),
     ...(env.AI_PROVIDER === "google-genai"
@@ -554,17 +558,23 @@ function igErrorMessage(status: number, json: any, step: string): string {
     err?.error_subcode != null ? `subcode=${err.error_subcode}` : undefined,
     err?.type ? `type=${err.type}` : undefined,
   ].filter(Boolean);
-  const hint =
-    !env.PUBLIC_BASE_URL.startsWith("https://")
-      ? " Hint: PUBLIC_BASE_URL must be public HTTPS for Instagram to fetch images."
-      : env.PUBLIC_BASE_URL.includes("localhost")
-        ? " Hint: PUBLIC_BASE_URL points at localhost — Instagram cannot reach it; use a tunnel."
-        : "";
+  const hint = !env.PUBLIC_BASE_URL.startsWith("https://")
+    ? " Hint: PUBLIC_BASE_URL must be public HTTPS for Instagram to fetch images."
+    : env.PUBLIC_BASE_URL.includes("localhost")
+      ? " Hint: PUBLIC_BASE_URL points at localhost — Instagram cannot reach it; use a tunnel."
+      : "";
   return parts.join(" — ") + hint;
 }
 
-async function igFetch<T>(url: string, body?: Record<string, unknown>, step = "request"): Promise<T> {
-  log("ig", `→ ${step}`, { method: body ? "POST" : "GET", url: url.replace(env.IG_ACCESS_TOKEN, "***") });
+async function igFetch<T>(
+  url: string,
+  body?: Record<string, unknown>,
+  step = "request",
+): Promise<T> {
+  log("ig", `→ ${step}`, {
+    method: body ? "POST" : "GET",
+    url: url.replace(env.IG_ACCESS_TOKEN, "***"),
+  });
   const res = await fetch(url, {
     method: body ? "POST" : "GET",
     headers: {
@@ -576,7 +586,9 @@ async function igFetch<T>(url: string, body?: Record<string, unknown>, step = "r
   const json = (await res.json()) as any;
   if (!res.ok || json.error) {
     const msg = igErrorMessage(res.status, json, step);
-    log("ig", `✗ ${msg}`, { body: body ? { ...body, caption: body.caption ? "[redacted]" : undefined } : undefined });
+    log("ig", `✗ ${msg}`, {
+      body: body ? { ...body, caption: body.caption ? "[redacted]" : undefined } : undefined,
+    });
     throw new Error(msg);
   }
   log("ig", `✓ ${step}`, { id: json.id, status_code: json.status_code });
@@ -590,7 +602,7 @@ function requireIgConfig() {
   if (missing.length) {
     throw new Error(
       `Cannot talk to Instagram — missing ${missing.join(" and ")} in .env. ` +
-        `Chat/create still work; only publish and reading the IG feed need these.`
+        `Chat/create still work; only publish and reading the IG feed need these.`,
     );
   }
 }
@@ -600,14 +612,14 @@ async function waitForContainer(containerId: string) {
     const s = await igFetch<{ status_code: string }>(
       `${IG_BASE()}/${containerId}?fields=status_code`,
       undefined,
-      `container status (${containerId})`
+      `container status (${containerId})`,
     );
     if (s.status_code === "FINISHED") return;
     if (s.status_code === "ERROR") {
       throw new Error(
         `Instagram failed to process media container ${containerId}. ` +
           `Usually PUBLIC_BASE_URL is not publicly reachable over HTTPS, or the image URL 404s. ` +
-          `Current PUBLIC_BASE_URL=${env.PUBLIC_BASE_URL}`
+          `Current PUBLIC_BASE_URL=${env.PUBLIC_BASE_URL}`,
       );
     }
     log("ig", `container ${containerId} status=${s.status_code}, waiting…`);
@@ -629,7 +641,7 @@ export async function igPublishImages(imageUrls: string[], caption: string): Pro
     const c = await igFetch<{ id: string }>(
       `${IG_BASE()}/${env.IG_USER_ID}/media`,
       { image_url: imageUrls[0], caption },
-      "create single-image container"
+      "create single-image container",
     );
     await waitForContainer(c.id);
     creationId = c.id;
@@ -641,7 +653,7 @@ export async function igPublishImages(imageUrls: string[], caption: string): Pro
       const item = await igFetch<{ id: string }>(
         `${IG_BASE()}/${env.IG_USER_ID}/media`,
         { image_url: url, is_carousel_item: true },
-        `create carousel item ${i + 1}/${imageUrls.length}`
+        `create carousel item ${i + 1}/${imageUrls.length}`,
       );
       await waitForContainer(item.id);
       children.push(item.id);
@@ -653,7 +665,7 @@ export async function igPublishImages(imageUrls: string[], caption: string): Pro
         children: children.join(","), // Instagram expects a comma-separated string, not an array
         caption,
       },
-      "create carousel parent"
+      "create carousel parent",
     );
     await waitForContainer(parent.id);
     creationId = parent.id;
@@ -662,7 +674,7 @@ export async function igPublishImages(imageUrls: string[], caption: string): Pro
   const published = await igFetch<{ id: string }>(
     `${IG_BASE()}/${env.IG_USER_ID}/media_publish`,
     { creation_id: creationId },
-    "media_publish"
+    "media_publish",
   );
   log("ig", "publish done", { igMediaId: published.id });
   return published.id;
@@ -683,7 +695,7 @@ export async function igFetchMyPosts(limit = 10): Promise<IgPost[]> {
   const json = await igFetch<{ data: IgPost[] }>(
     `${IG_BASE()}/me/media?fields=${fields}&limit=${limit}`,
     undefined,
-    "fetch my media"
+    "fetch my media",
   );
   return json.data ?? [];
 }
@@ -740,7 +752,7 @@ function pushEvent(
   scope: string,
   status: AgentEventStatus,
   message: string,
-  detail?: Record<string, unknown>
+  detail?: Record<string, unknown>,
 ) {
   const event: AgentEvent = { ts: new Date().toISOString(), scope, status, message, detail };
   ctx.events.push(event);
@@ -752,7 +764,10 @@ function toolError(message: string, detail?: Record<string, unknown>) {
 }
 
 function toolOk(data: unknown) {
-  return JSON.stringify({ ok: true, ...(typeof data === "object" && data ? data : { result: data }) });
+  return JSON.stringify({
+    ok: true,
+    ...(typeof data === "object" && data ? data : { result: data }),
+  });
 }
 
 function buildTools(ctx: AgentContext) {
@@ -760,10 +775,18 @@ function buildTools(ctx: AgentContext) {
     tool(
       async ({ topicOrText, verbatim }) => {
         try {
-          pushEvent(ctx, "create_post", "info", "generating text + images", { topicOrText, verbatim: !!verbatim });
+          pushEvent(ctx, "create_post", "info", "generating text + images", {
+            topicOrText,
+            verbatim: !!verbatim,
+          });
           const content = verbatim ? topicOrText : await aiGeneratePostText(topicOrText);
           const { imageFiles, imageCloudUrls } = await renderAndUploadImages(content);
-          const post = postRepo.create({ prompt: topicOrText, content, imageFiles, imageCloudUrls });
+          const post = postRepo.create({
+            prompt: topicOrText,
+            content,
+            imageFiles,
+            imageCloudUrls,
+          });
           ctx.touchedPostIds.add(post.id);
           pushEvent(ctx, "create_post", "ok", `created post ${post.id}`, {
             slides: imageFiles.length,
@@ -784,10 +807,15 @@ function buildTools(ctx: AgentContext) {
           "renders it as one or more images (carousel if long), and saves it. Returns the postId — " +
           "remember it for later edits or publishing. Does NOT publish to Instagram.",
         schema: z.object({
-          topicOrText: z.string().describe("Topic to write about, or the exact text if verbatim=true"),
-          verbatim: z.boolean().optional().describe("If true, use topicOrText as the post text as-is"),
+          topicOrText: z
+            .string()
+            .describe("Topic to write about, or the exact text if verbatim=true"),
+          verbatim: z
+            .boolean()
+            .optional()
+            .describe("If true, use topicOrText as the post text as-is"),
         }),
-      }
+      },
     ),
 
     tool(
@@ -822,9 +850,11 @@ function buildTools(ctx: AgentContext) {
           "Does NOT publish to Instagram.",
         schema: z.object({
           postId: z.string().describe("The post id"),
-          instruction: z.string().describe("How to change the text, e.g. 'make it shorter and funnier'"),
+          instruction: z
+            .string()
+            .describe("How to change the text, e.g. 'make it shorter and funnier'"),
         }),
-      }
+      },
     ),
 
     tool(
@@ -853,9 +883,10 @@ function buildTools(ctx: AgentContext) {
       },
       {
         name: "set_post_text",
-        description: "Replace a post's text with exact text provided by the user and re-render the image(s).",
+        description:
+          "Replace a post's text with exact text provided by the user and re-render the image(s).",
         schema: z.object({ postId: z.string(), text: z.string() }),
-      }
+      },
     ),
 
     tool(
@@ -868,7 +899,7 @@ function buildTools(ctx: AgentContext) {
         name: "list_posts",
         description: "List locally saved posts (most recent first) with their postIds.",
         schema: z.object({}),
-      }
+      },
     ),
 
     tool(
@@ -887,7 +918,7 @@ function buildTools(ctx: AgentContext) {
         name: "get_instagram_posts",
         description: "Fetch the user's recent posts from their Instagram account.",
         schema: z.object({ limit: z.number().int().min(1).max(50).optional() }),
-      }
+      },
     ),
 
     tool(
@@ -939,7 +970,7 @@ function buildTools(ctx: AgentContext) {
           postId: z.string(),
           caption: z.string().optional().describe("Custom caption; defaults to the post text"),
         }),
-      }
+      },
     ),
   ];
 }
@@ -970,12 +1001,18 @@ export interface AgentResult {
 }
 
 function buildDiagnostics(ctx: AgentContext, toolsCalled: string[]): AgentResult["diagnostics"] {
-  const failures = ctx.events.filter((e) => e.status === "error" || e.status === "refused").map((e) => e.message);
+  const failures = ctx.events
+    .filter((e) => e.status === "error" || e.status === "refused")
+    .map((e) => e.message);
   const warnings: string[] = [];
 
-  if (CREATE_INTENT.test(ctx.latestUserMessage) && !toolsCalled.includes("create_post") && ctx.touchedPostIds.size === 0) {
+  if (
+    CREATE_INTENT.test(ctx.latestUserMessage) &&
+    !toolsCalled.includes("create_post") &&
+    ctx.touchedPostIds.size === 0
+  ) {
     warnings.push(
-      "User message looks like a create request, but create_post was not called. The model may have skipped the tool."
+      "User message looks like a create request, but create_post was not called. The model may have skipped the tool.",
     );
   }
   if (PUBLISH_INTENT.test(ctx.latestUserMessage) && !toolsCalled.includes("publish_post")) {
@@ -983,15 +1020,17 @@ function buildDiagnostics(ctx: AgentContext, toolsCalled: string[]): AgentResult
       "User message looks like a publish request, but publish_post was not called. " +
         (!env.IG_ACCESS_TOKEN || !env.IG_USER_ID
           ? "IG credentials may be missing, or the model skipped the tool."
-          : "The model may have skipped the tool or needs a clearer postId.")
+          : "The model may have skipped the tool or needs a clearer postId."),
     );
   }
   if (PUBLISH_INTENT.test(ctx.latestUserMessage) && (!env.IG_ACCESS_TOKEN || !env.IG_USER_ID)) {
-    warnings.push("IG_ACCESS_TOKEN / IG_USER_ID not set — publish will fail until they are configured.");
+    warnings.push(
+      "IG_ACCESS_TOKEN / IG_USER_ID not set — publish will fail until they are configured.",
+    );
   }
   if (!cloudinaryConfigured()) {
     warnings.push(
-      "Cloudinary is not configured (CLOUDINARY_CLOUD_NAME / API_KEY / API_SECRET) — create/edit/publish need it for public image URLs."
+      "Cloudinary is not configured (CLOUDINARY_CLOUD_NAME / API_KEY / API_SECRET) — create/edit/publish need it for public image URLs.",
     );
   }
 
@@ -1017,7 +1056,11 @@ function enrichReply(reply: string, diagnostics: AgentResult["diagnostics"]): st
 
 /** Run one chat turn: load history, tool-call loop, persist, respond. */
 export async function runAgentTurn(sessionId: string, userMessage: string): Promise<AgentResult> {
-  const ctx: AgentContext = { latestUserMessage: userMessage, touchedPostIds: new Set(), events: [] };
+  const ctx: AgentContext = {
+    latestUserMessage: userMessage,
+    touchedPostIds: new Set(),
+    events: [],
+  };
   const tools = buildTools(ctx);
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const toolsCalled: string[] = [];

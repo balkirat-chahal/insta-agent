@@ -1,6 +1,7 @@
 // =============================================================================
 // main.ts — Hono + zod-openapi + Scalar (/docs)
-// Run: npx tsx main.ts
+// Dev:  pnpm dev
+// Prod: pnpm build && pnpm start
 // =============================================================================
 
 import { serve } from "@hono/node-server";
@@ -22,7 +23,7 @@ import {
   igPublishImages,
   igImageUrlsFor,
   igFetchMyPosts,
-} from "./utils";
+} from "./utils.js";
 
 const app = new OpenAPIHono();
 
@@ -37,7 +38,9 @@ const PostSchema = z
     content: z.string(),
     imageFiles: z.array(z.string()),
     imageUrls: z.array(z.string()).openapi({ description: "Local server URLs" }),
-    imageCloudUrls: z.array(z.string()).openapi({ description: "Cloudinary HTTPS URLs (used for Instagram)" }),
+    imageCloudUrls: z
+      .array(z.string())
+      .openapi({ description: "Cloudinary HTTPS URLs (used for Instagram)" }),
     isCarousel: z.boolean(),
     igMediaId: z.string().nullable(),
     createdAt: z.string(),
@@ -119,7 +122,8 @@ app.openapi(
                 description: "Omit on the first message; reuse afterwards",
               }),
               message: z.string().min(1).openapi({
-                example: "Make me a post about why side projects die, make it a bit long and dramatic",
+                example:
+                  "Make me a post about why side projects die, make it a bit long and dramatic",
               }),
             }),
           },
@@ -164,10 +168,13 @@ app.openapi(
       return c.json(result, 200);
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
-      console.error(`[${new Date().toISOString()}] [http] /api/chat crashed`, { sessionId: sid, error });
+      console.error(`[${new Date().toISOString()}] [http] /api/chat crashed`, {
+        sessionId: sid,
+        error,
+      });
       return c.json({ error }, 500);
     }
-  }
+  },
 );
 
 // -----------------------------------------------------------------------------
@@ -196,10 +203,17 @@ app.openapi(
     const { sessionId } = c.req.valid("param");
     const visible = chatRepo
       .history(sessionId)
-      .filter((m) => m.getType() === "human" || (m.getType() === "ai" && typeof m.content === "string" && m.content))
-      .map((m) => ({ role: m.getType() === "human" ? "user" : "assistant", content: String(m.content) }));
+      .filter(
+        (m) =>
+          m.getType() === "human" ||
+          (m.getType() === "ai" && typeof m.content === "string" && m.content),
+      )
+      .map((m) => ({
+        role: m.getType() === "human" ? "user" : "assistant",
+        content: String(m.content),
+      }));
     return c.json(visible);
-  }
+  },
 );
 
 // -----------------------------------------------------------------------------
@@ -217,7 +231,10 @@ app.openapi(
         content: {
           "application/json": {
             schema: z.object({
-              prompt: z.string().min(1).openapi({ example: "a motivational post about Monday mornings" }),
+              prompt: z
+                .string()
+                .min(1)
+                .openapi({ example: "a motivational post about Monday mornings" }),
             }),
           },
         },
@@ -225,7 +242,10 @@ app.openapi(
     },
     responses: {
       200: { description: "Created post", content: { "application/json": { schema: PostSchema } } },
-      500: { description: "Create failed", content: { "application/json": { schema: ErrorSchema } } },
+      500: {
+        description: "Create failed",
+        content: { "application/json": { schema: ErrorSchema } },
+      },
     },
   }),
   async (c) => {
@@ -240,7 +260,7 @@ app.openapi(
       console.error(`[${new Date().toISOString()}] [http] POST /api/posts failed`, { error });
       return c.json({ error }, 500);
     }
-  }
+  },
 );
 
 app.openapi(
@@ -250,10 +270,13 @@ app.openapi(
     tags: ["Posts"],
     summary: "List locally saved posts",
     responses: {
-      200: { description: "Posts", content: { "application/json": { schema: z.array(PostSchema) } } },
+      200: {
+        description: "Posts",
+        content: { "application/json": { schema: z.array(PostSchema) } },
+      },
     },
   }),
-  (c) => c.json(postRepo.list().map(toDto))
+  (c) => c.json(postRepo.list().map(toDto)),
 );
 
 app.openapi(
@@ -268,7 +291,10 @@ app.openapi(
         content: {
           "application/json": {
             schema: z.object({
-              instruction: z.string().min(1).openapi({ example: "make it funnier and add an emoji" }),
+              instruction: z
+                .string()
+                .min(1)
+                .openapi({ example: "make it funnier and add an emoji" }),
             }),
           },
         },
@@ -277,7 +303,10 @@ app.openapi(
     responses: {
       200: { description: "Updated post", content: { "application/json": { schema: PostSchema } } },
       404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
-      500: { description: "Update failed", content: { "application/json": { schema: ErrorSchema } } },
+      500: {
+        description: "Update failed",
+        content: { "application/json": { schema: ErrorSchema } },
+      },
     },
   }),
   async (c) => {
@@ -294,7 +323,7 @@ app.openapi(
       console.error(`[${new Date().toISOString()}] [http] PATCH /api/posts failed`, { id, error });
       return c.json({ error }, 500);
     }
-  }
+  },
 );
 
 app.openapi(
@@ -317,12 +346,15 @@ app.openapi(
     responses: {
       200: { description: "Published", content: { "application/json": { schema: PostSchema } } },
       404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
-      502: { description: "Instagram error", content: { "application/json": { schema: ErrorSchema } } },
+      502: {
+        description: "Instagram error",
+        content: { "application/json": { schema: ErrorSchema } },
+      },
     },
   }),
   async (c) => {
     const { id } = c.req.valid("param");
-    const body = await c.req.json().catch(() => ({} as { caption?: string }));
+    const body = await c.req.json().catch(() => ({}) as { caption?: string });
     const post = postRepo.get(id);
     if (!post) return c.json({ error: "Post not found" }, 404);
     try {
@@ -331,7 +363,7 @@ app.openapi(
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
     }
-  }
+  },
 );
 
 app.openapi(
@@ -358,12 +390,15 @@ app.openapi(
                 media_url: z.string().optional(),
                 permalink: z.string().optional(),
                 timestamp: z.string().optional(),
-              })
+              }),
             ),
           },
         },
       },
-      502: { description: "Instagram error", content: { "application/json": { schema: ErrorSchema } } },
+      502: {
+        description: "Instagram error",
+        content: { "application/json": { schema: ErrorSchema } },
+      },
     },
   }),
   async (c) => {
@@ -373,7 +408,7 @@ app.openapi(
     } catch (e) {
       return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
     }
-  }
+  },
 );
 
 // -----------------------------------------------------------------------------
@@ -442,13 +477,13 @@ serve({ fetch: app.fetch, port: env.PORT }, async (info) => {
       });
       // Root path returns 404; any HTTP response means DNS/TLS/network are fine.
       console.log(
-        `🌐 Gemini API reachability: ok (host reachable; HTTP ${res.status} on / is expected)`
+        `🌐 Gemini API reachability: ok (host reachable; HTTP ${res.status} on / is expected)`,
       );
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       const cause = err.cause instanceof Error ? err.cause.message : "";
       console.log(
-        `🌐 Gemini API reachability: FAILED — ${err.message}${cause ? ` ← ${cause}` : ""}`
+        `🌐 Gemini API reachability: FAILED — ${err.message}${cause ? ` ← ${cause}` : ""}`,
       );
       console.log("   Tip: check Wi‑Fi/VPN/DNS, or try another network. Node may fail IPv6;");
       console.log("   pnpm dev already forces ipv4first.");
