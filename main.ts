@@ -412,7 +412,7 @@ app.doc("/openapi.json", {
 app.get("/docs", Scalar({ url: "/openapi.json", theme: "purple" }));
 app.get("/", (c) => c.redirect("/chat"));
 
-serve({ fetch: app.fetch, port: env.PORT }, (info) => {
+serve({ fetch: app.fetch, port: env.PORT }, async (info) => {
   console.log(`🚀 chat  http://localhost:${info.port}/chat`);
   console.log(`📚 docs  http://localhost:${info.port}/docs`);
 
@@ -421,7 +421,7 @@ serve({ fetch: app.fetch, port: env.PORT }, (info) => {
     ["AI_MODEL", !!env.AI_MODEL],
     ["OPENAI_BASE_URL", !!env.OPENAI_BASE_URL],
     ["OPENAI_API_KEY", !!env.OPENAI_API_KEY],
-    ["GOOGLE_API_KEY", !!process.env.GOOGLE_API_KEY],
+    ["GOOGLE_API_KEY", !!(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)],
     ["CLOUDINARY_CLOUD_NAME", !!env.CLOUDINARY_CLOUD_NAME],
     ["CLOUDINARY_API_KEY", !!env.CLOUDINARY_API_KEY],
     ["CLOUDINARY_API_SECRET", !!env.CLOUDINARY_API_SECRET],
@@ -432,5 +432,30 @@ serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log("🔑 env credentials:");
   for (const [name, ok] of checks) {
     console.log(`   ${ok ? "✓" : "✗"} ${name}${ok ? "" : "  (missing)"}`);
+  }
+
+  if (env.AI_PROVIDER === "google-genai") {
+    try {
+      const res = await fetch("https://generativelanguage.googleapis.com/", {
+        method: "GET",
+        signal: AbortSignal.timeout(8000),
+      });
+      // Root path returns 404; any HTTP response means DNS/TLS/network are fine.
+      console.log(
+        `🌐 Gemini API reachability: ok (host reachable; HTTP ${res.status} on / is expected)`
+      );
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      const cause = err.cause instanceof Error ? err.cause.message : "";
+      console.log(
+        `🌐 Gemini API reachability: FAILED — ${err.message}${cause ? ` ← ${cause}` : ""}`
+      );
+      console.log("   Tip: check Wi‑Fi/VPN/DNS, or try another network. Node may fail IPv6;");
+      console.log("   pnpm dev already forces ipv4first.");
+    }
+
+    if (!(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY)) {
+      console.log("⚠️  GOOGLE_API_KEY is empty — paste your Gemini key into .env and restart.");
+    }
   }
 });

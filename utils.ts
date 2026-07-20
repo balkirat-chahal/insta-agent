@@ -37,8 +37,20 @@ import {
 } from "@langchain/core/messages";
 
 function formatError(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
+  if (!(e instanceof Error)) return String(e);
+  const parts: string[] = [e.message];
+  let cur: unknown = e.cause;
+  for (let i = 0; i < 4 && cur; i++) {
+    if (cur instanceof Error) {
+      const code = (cur as NodeJS.ErrnoException).code;
+      parts.push(code ? `${cur.message} (${code})` : cur.message);
+      cur = cur.cause;
+    } else {
+      parts.push(String(cur));
+      break;
+    }
+  }
+  return parts.join(" ← ");
 }
 
 function log(scope: string, message: string, extra?: Record<string, unknown>) {
@@ -476,6 +488,7 @@ export function igImageUrlsFor(post: Post): string[] {
 let modelPromise: ReturnType<typeof initChatModel> | null = null;
 
 export function getModel() {
+  const googleKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "";
   modelPromise ??= initChatModel(env.AI_MODEL, {
     modelProvider: env.AI_PROVIDER,
     temperature: 0.8,
@@ -485,6 +498,11 @@ export function getModel() {
           configuration: env.OPENAI_BASE_URL
             ? { baseURL: env.OPENAI_BASE_URL }
             : undefined,
+        }
+      : {}),
+    ...(env.AI_PROVIDER === "google-genai"
+      ? {
+          apiKey: googleKey || undefined,
         }
       : {}),
   });
@@ -683,7 +701,9 @@ export async function igFetchMyPosts(limit = 10): Promise<IgPost[]> {
 //      Adjust PUBLISH_INTENT if it's too strict for your phrasing.
 // =============================================================================
 
-const PUBLISH_INTENT = /\b(post it|post this|post that|publish|upload|share|put it on|instagram|ig)\b/i;
+// Require an explicit publish action — do NOT match mere mentions of "instagram".
+const PUBLISH_INTENT =
+  /\b(post it|post this|post that|publish(?:\s+it)?|upload(?:\s+it)?|share it|put it on|post(?:\s+(?:it|this|that))?\s+to\s+(?:instagram|ig)|(?:publish|upload|share).{0,24}(?:instagram|ig))\b/i;
 const CREATE_INTENT = /\b(create|make|write|generate|draft)\b.*\b(post|carousel|image|slide)/i;
 
 export type AgentEventStatus = "ok" | "error" | "refused" | "info";
@@ -1084,7 +1104,12 @@ export async function runAgentTurn(sessionId: string, userMessage: string): Prom
   } catch (e) {
     const message = `Agent loop failed: ${formatError(e)}`;
     pushEvent(ctx, "agent", "error", message);
-    reply = "Something went wrong while talking to the model.";
+    if (ctx.touchedPostIds.size > 0) {
+      reply =
+        "I ran into a model error after updating your post(s). The images should still be available below — try sending another message if you need edits or publishing.";
+    } else {
+      reply = "Something went wrong while talking to the model.";
+    }
   }
 
   chatRepo.append(sessionId, newMessages);

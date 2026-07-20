@@ -1,0 +1,119 @@
+diff --git a/dist/utils/common.cjs b/dist/utils/common.cjs
+index 7c0a6a9f4b6390cbee11946c85bd48e7590e2638..1a368b952038e788fd6b44d89a07cfae24ba7dd7 100644
+--- a/dist/utils/common.cjs
++++ b/dist/utils/common.cjs
+@@ -321,12 +321,22 @@ function convertMessageContentToParts(message, isMultimodalModel, previousMessag
+             .filter((p) => p !== undefined));
+     }
+     if ((0, messages_1.isAIMessage)(message) && message.tool_calls?.length) {
+-        functionCalls = message.tool_calls.map((tc) => {
++        // Gemini 3 requires thought_signature on functionCall parts when history
++        // is sent back. Preserve real signatures when present; otherwise use the
++        // documented skip token so tool loops don't 400.
++        // https://ai.google.dev/gemini-api/docs/thought-signatures
++        const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
++        const sigMap = (message.additional_kwargs?.__gemini_function_call_thought_signatures__ ??
++            {});
++        functionCalls = message.tool_calls.map((tc, idx) => {
++            const thoughtSignature = (tc.id && sigMap[tc.id]) ||
++                (idx === 0 ? SKIP_THOUGHT_SIGNATURE : undefined);
+             return {
+                 functionCall: {
+                     name: tc.name,
+                     args: tc.args,
+                 },
++                ...(thoughtSignature ? { thoughtSignature } : {}),
+             };
+         });
+     }
+diff --git a/dist/utils/common.js b/dist/utils/common.js
+index 24b0cc9f333632dd240e71fe66a93def86ce3ae7..ae671f6c5705e176c3a9b4d032807d59048c97a8 100644
+--- a/dist/utils/common.js
++++ b/dist/utils/common.js
+@@ -312,12 +312,22 @@ export function convertMessageContentToParts(message, isMultimodalModel, previou
+             .filter((p) => p !== undefined));
+     }
+     if (isAIMessage(message) && message.tool_calls?.length) {
+-        functionCalls = message.tool_calls.map((tc) => {
++        // Gemini 3 requires thought_signature on functionCall parts when history
++        // is sent back. Preserve real signatures when present; otherwise use the
++        // documented skip token so tool loops don't 400.
++        // https://ai.google.dev/gemini-api/docs/thought-signatures
++        const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
++        const sigMap = (message.additional_kwargs?.__gemini_function_call_thought_signatures__ ??
++            {});
++        functionCalls = message.tool_calls.map((tc, idx) => {
++            const thoughtSignature = (tc.id && sigMap[tc.id]) ||
++                (idx === 0 ? SKIP_THOUGHT_SIGNATURE : undefined);
+             return {
+                 functionCall: {
+                     name: tc.name,
+                     args: tc.args,
+                 },
++                ...(thoughtSignature ? { thoughtSignature } : {}),
+             };
+         });
+     }
+@@ -382,6 +392,27 @@ export function mapGenerateContentResultToChatResult(response, extra) {
+     const functionCalls = response.functionCalls();
+     const [candidate] = response.candidates;
+     const { content: candidateContent, ...generationInfo } = candidate;
++    // Capture Gemini 3 thought signatures from functionCall parts (if present).
++    const functionThoughtSignatures = {};
++    const toolCallsWithIds = [];
++    if (Array.isArray(candidateContent?.parts)) {
++        for (const p of candidateContent.parts) {
++            if (p && typeof p === "object" && "functionCall" in p && p.functionCall) {
++                const id = "id" in p.functionCall && typeof p.functionCall.id === "string"
++                    ? p.functionCall.id
++                    : uuidv4();
++                toolCallsWithIds.push({
++                    name: p.functionCall.name,
++                    args: p.functionCall.args,
++                    type: "tool_call",
++                    id,
++                });
++                if (typeof p.thoughtSignature === "string" && p.thoughtSignature) {
++                    functionThoughtSignatures[id] = p.thoughtSignature;
++                }
++            }
++        }
++    }
+     let content;
+     if (Array.isArray(candidateContent?.parts) &&
+         candidateContent.parts.length === 1 &&
+@@ -424,19 +455,27 @@ export function mapGenerateContentResultToChatResult(response, extra) {
+         const block = content.find((b) => "text" in b);
+         text = block?.text ?? text;
+     }
++    const resolvedToolCalls = toolCallsWithIds.length
++        ? toolCallsWithIds
++        : functionCalls?.map((fc) => {
++            return {
++                ...fc,
++                type: "tool_call",
++                id: "id" in fc && typeof fc.id === "string" ? fc.id : uuidv4(),
++            };
++        });
+     const generation = {
+         text,
+         message: new AIMessage({
+             content: content ?? "",
+-            tool_calls: functionCalls?.map((fc) => {
+-                return {
+-                    ...fc,
+-                    type: "tool_call",
+-                    id: "id" in fc && typeof fc.id === "string" ? fc.id : uuidv4(),
+-                };
+-            }),
++            tool_calls: resolvedToolCalls,
+             additional_kwargs: {
+                 ...generationInfo,
++                ...(Object.keys(functionThoughtSignatures).length
++                    ? {
++                        __gemini_function_call_thought_signatures__: functionThoughtSignatures,
++                    }
++                    : {}),
+             },
+             usage_metadata: extra?.usageMetadata,
+         }),

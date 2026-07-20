@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@langchain/google-genai@0.2.18':
+    hash: fzgonjiuo6duvqmuun66k3qfuy
+    path: patches/@langchain__google-genai@0.2.18.patch
+
 importers:
 
   .:
@@ -19,7 +24,7 @@ importers:
         version: 0.3.80(openai@6.46.0(zod@3.25.76))
       '@langchain/google-genai':
         specifier: ^0.2.10
-        version: 0.2.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))
+        version: 0.2.18(patch_hash=fzgonjiuo6duvqmuun66k3qfuy)(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))
       '@langchain/openai':
         specifier: ^0.5.18
         version: 0.5.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))
@@ -43,7 +48,7 @@ importers:
         version: 4.12.30
       langchain:
         specifier: ^0.3.27
-        version: 0.3.37(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))(@langchain/google-genai@0.2.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76))))(openai@6.46.0(zod@3.25.76))
+        version: 0.3.37(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))(@langchain/google-genai@0.2.18(patch_hash=fzgonjiuo6duvqmuun66k3qfuy)(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76))))(openai@6.46.0(zod@3.25.76))
       sharp:
         specifier: ^0.34.1
         version: 0.34.5
@@ -1160,7 +1165,7 @@ snapshots:
       - '@opentelemetry/sdk-trace-base'
       - openai
 
-  '@langchain/google-genai@0.2.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))':
+  '@langchain/google-genai@0.2.18(patch_hash=fzgonjiuo6duvqmuun66k3qfuy)(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))':
     dependencies:
       '@google/generative-ai': 0.24.1
       '@langchain/core': 0.3.80(openai@6.46.0(zod@3.25.76))
@@ -1347,7 +1352,7 @@ snapshots:
 
   jsonpointer@5.0.1: {}
 
-  langchain@0.3.37(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))(@langchain/google-genai@0.2.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76))))(openai@6.46.0(zod@3.25.76)):
+  langchain@0.3.37(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))(@langchain/google-genai@0.2.18(patch_hash=fzgonjiuo6duvqmuun66k3qfuy)(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76))))(openai@6.46.0(zod@3.25.76)):
     dependencies:
       '@langchain/core': 0.3.80(openai@6.46.0(zod@3.25.76))
       '@langchain/openai': 0.5.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))
@@ -1362,7 +1367,7 @@ snapshots:
       yaml: 2.9.0
       zod: 3.25.76
     optionalDependencies:
-      '@langchain/google-genai': 0.2.18(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))
+      '@langchain/google-genai': 0.2.18(patch_hash=fzgonjiuo6duvqmuun66k3qfuy)(@langchain/core@0.3.80(openai@6.46.0(zod@3.25.76)))
     transitivePeerDependencies:
       - '@opentelemetry/api'
       - '@opentelemetry/exporter-trace-otlp-proto'

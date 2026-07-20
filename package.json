@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx main.ts",
-    "start": "tsx main.ts",
+    "dev": "NODE_OPTIONS=--dns-result-order=ipv4first tsx main.ts",
+    "start": "NODE_OPTIONS=--dns-result-order=ipv4first tsx main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -29,5 +29,10 @@
     "@types/node": "^22.15.21",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@langchain/google-genai@0.2.18": "patches/@langchain__google-genai@0.2.18.patch"
+    }
   }
 }
