@@ -10,8 +10,8 @@ cp .env.example .env   # fill in keys
 pnpm dev
 ```
 
-- Chat UI: http://localhost:3000/chat  
-- API docs: http://localhost:3000/docs  
+- Chat UI: http://localhost:3000/chat
+- API docs: http://localhost:3000/docs
 
 ```bash
 pnpm build && pnpm start   # production (tsc → dist/)
@@ -19,25 +19,25 @@ pnpm build && pnpm start   # production (tsc → dist/)
 
 ### Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `pnpm dev` | Run with `tsx` from `src/main.ts` |
-| `pnpm build` | Emit `dist/` |
-| `pnpm start` | Run `node dist/main.js` |
-| `pnpm typecheck` | `tsc --noEmit` |
-| `pnpm lint` / `lint:fix` | Oxlint |
-| `pnpm fmt` / `fmt:check` | Oxfmt |
+| Script                   | Purpose                           |
+| ------------------------ | --------------------------------- |
+| `pnpm dev`               | Run with `tsx` from `src/main.ts` |
+| `pnpm build`             | Emit `dist/`                      |
+| `pnpm start`             | Run `node dist/main.js`           |
+| `pnpm typecheck`         | `tsc --noEmit`                    |
+| `pnpm lint` / `lint:fix` | Oxlint                            |
+| `pnpm fmt` / `fmt:check` | Oxfmt                             |
 
 ## Environment
 
 See `.env.example`. Important groups:
 
-| Area | Vars |
-|------|------|
-| LLM | `AI_PROVIDER`, `AI_MODEL`, plus `GOOGLE_API_KEY` (Gemini) or `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` (Ollama / OpenAI-compatible) |
-| Cloudinary | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` — required for create/edit uploads and IG publish |
-| Instagram | `IG_ACCESS_TOKEN`, `IG_USER_ID`, `IG_API_VERSION` — only for publish / fetch feed |
-| Local URLs | `PUBLIC_BASE_URL` — used for local `/images/...` links in API responses (IG uses Cloudinary HTTPS URLs) |
+| Area       | Vars                                                                                                                                    |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| LLM        | `AI_PROVIDER`, `AI_MODEL`, plus `GOOGLE_API_KEY` (Gemini) or `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` (Ollama / OpenAI-compatible) |
+| Cloudinary | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` — required for create/edit uploads and IG publish                |
+| Instagram  | `IG_ACCESS_TOKEN`, `IG_USER_ID`, `IG_API_VERSION` — only for publish / fetch feed                                                       |
+| Local URLs | `PUBLIC_BASE_URL` — used for local `/images/...` links in API responses (IG uses Cloudinary HTTPS URLs)                                 |
 
 Startup logs print which credentials are present/missing.
 
@@ -47,26 +47,28 @@ Startup logs print which credentials are present/missing.
 
 ```
 src/main.ts      HTTP (Hono + zod-openapi), chat UI, docs
-src/utils.ts     env, SQLite, render, Cloudinary, Instagram, agent loop
+src/agent.ts     Chat agent tool loop (`runAgentTurn`, tools, diagnostics)
+src/utils.ts     env, SQLite, render, Cloudinary, Instagram, AI helpers, logging
 public/chat.html Simple chat frontend (POST /api/chat only)
 data/            SQLite DB + local PNGs (gitignored)
 dist/            Build output
 ```
 
-| Layer | Responsibility |
-|-------|----------------|
-| `main.ts` | Routes, validation, DTOs — little business logic |
-| `utils.ts` | Tools, storage, image pipeline, IG, `runAgentTurn` |
+| Layer      | Responsibility                                      |
+| ---------- | --------------------------------------------------- |
+| `main.ts`  | Routes, validation, DTOs — little business logic    |
+| `agent.ts` | Tool-calling loop, publish guards, turn diagnostics |
+| `utils.ts` | Shared helpers used by HTTP + agent                 |
 
 ## What you can do
 
 Via chat (`/api/chat`) or matching REST endpoints:
 
-- **Create** post text → render 1–10 slides → save local + Cloudinary  
-- **Edit** by instruction or set exact text (re-render + re-upload)  
-- **List** local posts  
-- **Fetch** your Instagram feed  
-- **Publish** a saved post (single or carousel) — only with explicit publish intent  
+- **Create** post text → render 1–10 slides → save local + Cloudinary
+- **Edit** by instruction or set exact text (re-render + re-upload)
+- **List** local posts
+- **Fetch** your Instagram feed
+- **Publish** a saved post (single or carousel) — only with explicit publish intent
 
 Chat UI: http://localhost:3000/chat — new chat = new `sessionId`.
 
@@ -81,7 +83,7 @@ Verified against `src/utils.ts` (`runAgentTurn`, `buildTools`).
 When `POST /api/chat` calls `runAgentTurn(sessionId, userMessage)`:
 
 1. **Per-turn context (`ctx`)** — `{ latestUserMessage, touchedPostIds, events }`.  
-   `buildTools(ctx)` runs every turn. Tools are **closures over `ctx`**, so the publish hard-guard can read the *current* user text without trusting the model.
+   `buildTools(ctx)` runs every turn. Tools are **closures over `ctx`**, so the publish hard-guard can read the _current_ user text without trusting the model.
 
 2. **Six LangChain tools** (zod schemas → function-calling JSON for the model):  
    `create_post`, `edit_post`, `set_post_text`, `list_posts`, `get_instagram_posts`, `publish_post`.  
@@ -121,17 +123,17 @@ Mechanics:
 
 ### Publish double-guard
 
-1. **Soft:** system prompt + tool description — only call `publish_post` when explicitly asked.  
+1. **Soft:** system prompt + tool description — only call `publish_post` when explicitly asked.
 2. **Hard:** first line of `publish_post` runs `PUBLISH_INTENT` against `ctx.latestUserMessage`. No match → `REFUSED` JSON, no Instagram call.
 
 `PUBLISH_INTENT` requires explicit phrasing (e.g. “publish it”, “post this to Instagram”). Mere mention of “instagram” in a creative brief does **not** match.
 
 ### Side channels: events, touched posts, diagnostics
 
-- Tools call `pushEvent` and add IDs to `touchedPostIds`.  
-- **`touchedPosts`** — resolved `postSummary` objects (local + Cloudinary URLs) for the UI without parsing prose.  
-- **`diagnostics`** — `events`, `failures` (error/refused), `warnings` (intent matched but tool skipped; missing IG/Cloudinary), `toolsCalled`.  
-- **`enrichReply`** appends failures/warnings to the reply unless the model already included them.  
+- Tools call `pushEvent` and add IDs to `touchedPostIds`.
+- **`touchedPosts`** — resolved `postSummary` objects (local + Cloudinary URLs) for the UI without parsing prose.
+- **`diagnostics`** — `events`, `failures` (error/refused), `warnings` (intent matched but tool skipped; missing IG/Cloudinary), `toolsCalled`.
+- **`enrichReply`** appends failures/warnings to the reply unless the model already included them.
 - **`chatRepo.append(sessionId, newMessages)`** persists the turn so the next message sees prior tool outputs (e.g. postIds for “edit that”).
 
 ### One-line data flow
@@ -167,18 +169,18 @@ Instagram cannot fetch `localhost`; Cloudinary URLs are required on the post.
 
 ## API sketch
 
-| Method | Path | Notes |
-|--------|------|--------|
-| `POST` | `/api/chat` | Agent turn; body `{ sessionId?, message }` |
-| `GET` | `/api/chat/:sessionId` | Visible user/assistant history |
-| `POST` | `/api/posts` | Create without chat |
-| `GET` | `/api/posts` | List |
-| `PATCH` | `/api/posts/:id` | Edit by instruction |
-| `POST` | `/api/posts/:id/publish` | Publish |
-| `GET` | `/api/instagram/posts` | Recent IG media |
-| `GET` | `/images/:filename` | Local PNG |
-| `GET` | `/chat` | UI |
-| `GET` | `/docs` | Scalar OpenAPI |
+| Method  | Path                     | Notes                                      |
+| ------- | ------------------------ | ------------------------------------------ |
+| `POST`  | `/api/chat`              | Agent turn; body `{ sessionId?, message }` |
+| `GET`   | `/api/chat/:sessionId`   | Visible user/assistant history             |
+| `POST`  | `/api/posts`             | Create without chat                        |
+| `GET`   | `/api/posts`             | List                                       |
+| `PATCH` | `/api/posts/:id`         | Edit by instruction                        |
+| `POST`  | `/api/posts/:id/publish` | Publish                                    |
+| `GET`   | `/api/instagram/posts`   | Recent IG media                            |
+| `GET`   | `/images/:filename`      | Local PNG                                  |
+| `GET`   | `/chat`                  | UI                                         |
+| `GET`   | `/docs`                  | Scalar OpenAPI                             |
 
 Full schemas: `/openapi.json` or `/docs`.
 
@@ -186,21 +188,21 @@ Full schemas: `/openapi.json` or `/docs`.
 
 SQLite (`data/app.db` by default):
 
-- **`posts`** — prompt, content, `image_files`, `image_cloud_urls`, `ig_media_id`, timestamps  
-- **`chat_messages`** — `session_id` + serialized LangChain stored messages  
+- **`posts`** — prompt, content, `image_files`, `image_cloud_urls`, `ig_media_id`, timestamps
+- **`chat_messages`** — `session_id` + serialized LangChain stored messages
 
 Local PNGs under `data/images/`.
 
 ## Debugging cheatsheet
 
-| Symptom | Check |
-|---------|--------|
-| Reply but no images | `diagnostics.toolsCalled` — did `create_post` run? |
-| Tool error in UI | `diagnostics.failures` + `[create_post]` / `[cloudinary]` / `[ig]` logs |
-| Publish refused | Message vs `PUBLISH_INTENT`; not just “make an IG post” |
-| Publish API error | Cloudinary URLs on post? `IG_*` set? |
-| Session amnesia | Client dropped `sessionId` / New chat |
-| Gemini 400 after a tool | Thought-signature patch applied? (`pnpm install` with patches) |
+| Symptom                 | Check                                                                   |
+| ----------------------- | ----------------------------------------------------------------------- |
+| Reply but no images     | `diagnostics.toolsCalled` — did `create_post` run?                      |
+| Tool error in UI        | `diagnostics.failures` + `[create_post]` / `[cloudinary]` / `[ig]` logs |
+| Publish refused         | Message vs `PUBLISH_INTENT`; not just “make an IG post”                 |
+| Publish API error       | Cloudinary URLs on post? `IG_*` set?                                    |
+| Session amnesia         | Client dropped `sessionId` / New chat                                   |
+| Gemini 400 after a tool | Thought-signature patch applied? (`pnpm install` with patches)          |
 
 ## License
 

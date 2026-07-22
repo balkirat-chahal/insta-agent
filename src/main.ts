@@ -14,7 +14,6 @@ import {
   env,
   postRepo,
   chatRepo,
-  runAgentTurn,
   aiGeneratePostText,
   aiRevisePostText,
   renderAndUploadImages,
@@ -24,6 +23,7 @@ import {
   igImageUrlsFor,
   igFetchMyPosts,
 } from "./utils.js";
+import { runAgentTurn } from "./agent.js";
 
 const app = new OpenAPIHono();
 

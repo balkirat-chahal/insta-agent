@@ -30,6 +30,8 @@
     "zod": "^3.25.28"
   },
   "devDependencies": {
+    "@oxfmt/binding-darwin-arm64": "^0.60.0",
+    "@oxlint/binding-darwin-arm64": "^1.75.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.21",
     "oxfmt": "^0.59.0",
